@@ -1,0 +1,14 @@
+# AIGC LoRA 推理服务依赖
+# 安装: pip install -r requirements.txt
+#
+# 注意: torch 已在 conda 环境 (GPUpytorch-env) 中预装，
+# 不要用 pip 重新安装 torch，否则可能和 CUDA 版本冲突。
+
+fastapi>=0.100.0
+uvicorn[standard]>=0.23.0
+diffusers>=0.24.0
+peft>=0.7.0
+transformers>=4.35.0
+accelerate>=0.25.0
+safetensors>=0.4.0
+Pillow>=9.0.0
