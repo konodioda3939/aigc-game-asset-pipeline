@@ -12,3 +12,11 @@ transformers>=4.35.0
 accelerate>=0.25.0
 safetensors>=0.4.0
 Pillow>=9.0.0
+# ControlNet 依赖（新增）:
+#   运行 install_controlnet.bat 一键安装
+#   - controlnet_aux>=0.0.7    (Canny/Scribble 预处理器)
+#   - python-multipart>=0.0.6  (FastAPI 文件上传)
+#   - opencv-python>=4.8.0     (边缘检测)
+controlnet_aux>=0.0.7
+python-multipart>=0.0.6
+opencv-python>=4.8.0

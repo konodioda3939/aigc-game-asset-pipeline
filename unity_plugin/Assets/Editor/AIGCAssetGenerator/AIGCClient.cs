@@ -93,6 +93,134 @@ namespace AIGCAssetGenerator
         }
 
         /// <summary>
+        /// ControlNet 可控生成：上传参考图 + prompt，AI 保持结构骨架生成精修图。
+        /// </summary>
+        /// <param name="referenceImage">参考图（草图/线稿/轮廓）</param>
+        /// <param name="prompt">画面描述</param>
+        /// <param name="controlMode">控制方式："canny" 或 "scribble"</param>
+        /// <param name="assetType">资产类型</param>
+        /// <param name="seed">随机种子</param>
+        /// <param name="steps">推理步数</param>
+        /// <param name="guidanceScale">引导强度</param>
+        /// <param name="controlStrength">ControlNet 控制力度（0.1~2.0）</param>
+        /// <returns>生成的 Texture2D 图片</returns>
+        public static async Task<Texture2D> GenerateControlled(
+            Texture2D referenceImage,
+            string prompt,
+            string controlMode = "canny",
+            string assetType = "贴图",
+            int? seed = null,
+            int? steps = null,
+            float? guidanceScale = null,
+            float controlStrength = 0.8f)
+        {
+            if (referenceImage == null)
+                throw new ArgumentNullException(nameof(referenceImage));
+
+            string fullPrompt = BuildPrompt(prompt, assetType);
+
+            // 确保贴图可读（Unity 默认锁定贴图像素，需要用 RenderTexture 桥接一次）
+            Texture2D readableTexture = MakeTextureReadable(referenceImage);
+            try
+            {
+                // 将 Texture2D 编码为 PNG 字节
+                byte[] pngBytes = readableTexture.EncodeToPNG();
+                if (pngBytes == null || pngBytes.Length == 0)
+                    throw new AIGCException("参考图编码失败。");
+
+                // 构造 multipart/form-data
+                var formData = new System.Collections.Generic.List<UnityEngine.Networking.IMultipartFormSection>
+                {
+                    new MultipartFormFileSection("image", pngBytes, "reference.png", "image/png"),
+                    new MultipartFormDataSection("prompt", fullPrompt),
+                    new MultipartFormDataSection("control_mode", controlMode),
+                    new MultipartFormDataSection("steps", (steps ?? AIGCSettings.DefaultSteps).ToString()),
+                    new MultipartFormDataSection("guidance_scale", (guidanceScale ?? AIGCSettings.DefaultGuidanceScale).ToString("F1", System.Globalization.CultureInfo.InvariantCulture)),
+                    new MultipartFormDataSection("control_strength", controlStrength.ToString("F2", System.Globalization.CultureInfo.InvariantCulture)),
+                    new MultipartFormDataSection("negative_prompt", AIGCSettings.DefaultNegativePrompt),
+                };
+
+                if (seed.HasValue)
+                    formData.Add(new MultipartFormDataSection("seed", seed.Value.ToString()));
+
+                string url = $"{AIGCSettings.ApiBaseUrl}/generate-controlled";
+
+                using (var request = UnityWebRequest.Post(url, formData))
+                {
+                    request.timeout = 180;
+
+                    var tcs = new TaskCompletionSource<bool>();
+                    var operation = request.SendWebRequest();
+                    operation.completed += _ => tcs.SetResult(true);
+                    await tcs.Task;
+
+                    if (request.result != UnityWebRequest.Result.Success)
+                    {
+                        string detail = request.downloadHandler?.text ?? request.error;
+                        throw new AIGCException(
+                            $"生成失败: {request.error}\n" +
+                            $"详细信息: {detail}\n\n" +
+                            $"请确认推理服务已启动。\n" +
+                            $"首次使用 ControlNet 需要下载模型（约 1.4GB），请检查服务端日志。"
+                        );
+                    }
+
+                    byte[] imageData = request.downloadHandler.data;
+                    if (imageData == null || imageData.Length == 0)
+                        throw new AIGCException("服务返回了空数据。");
+
+                    Texture2D texture = new Texture2D(2, 2, TextureFormat.RGBA32, false);
+                    if (!texture.LoadImage(imageData))
+                        throw new AIGCException("图片数据解析失败。");
+
+                    return texture;
+                }
+            }
+            finally
+            {
+                // 清理临时可读贴图（避免内存泄漏）
+                if (readableTexture != referenceImage)
+                    UnityEngine.Object.DestroyImmediate(readableTexture);
+            }
+        }
+
+        /// <summary>
+        /// 让任意 Texture2D 变为可读（即使是 Unity 锁定像素的导入贴图）。
+        /// 原理：通过 RenderTexture 桥接，把像素数据拷贝到一个新贴图里。
+        /// </summary>
+        private static Texture2D MakeTextureReadable(Texture2D source)
+        {
+            // 如果本身就可读，直接返回
+            try
+            {
+                source.GetPixel(0, 0);
+                return source;
+            }
+            catch (UnityException)
+            {
+                // 不可读，走 RenderTexture 桥接
+            }
+
+            RenderTexture rt = RenderTexture.GetTemporary(
+                source.width, source.height, 0,
+                RenderTextureFormat.Default, RenderTextureReadWrite.Linear
+            );
+
+            Graphics.Blit(source, rt);
+            RenderTexture previous = RenderTexture.active;
+            RenderTexture.active = rt;
+
+            Texture2D readable = new Texture2D(source.width, source.height, TextureFormat.RGBA32, false);
+            readable.ReadPixels(new Rect(0, 0, rt.width, rt.height), 0, 0);
+            readable.Apply();
+
+            RenderTexture.active = previous;
+            RenderTexture.ReleaseTemporary(rt);
+
+            return readable;
+        }
+
+        /// <summary>
         /// 检查推理服务是否在线。
         /// </summary>
         /// <returns>true 表示服务就绪</returns>

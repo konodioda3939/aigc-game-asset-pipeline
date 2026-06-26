@@ -25,6 +25,16 @@ namespace AIGCAssetGenerator
         private int _assetTypeIndex = 1; // 默认"贴图"
         private static readonly string[] AssetTypeNames = { "图标", "贴图", "UI元素" };
 
+        // 生成模式
+        private int _generationMode = 0; // 0=文生图, 1=草图精修
+        private static readonly string[] GenerationModeNames = { "文生图", "草图精修" };
+
+        // ControlNet 参数
+        private int _controlModeIndex = 0; // 0=Canny, 1=Scribble
+        private static readonly string[] ControlModeNames = { "Canny 线稿精修", "Scribble 草图生成", "Depth 深度保持" };
+        private Texture2D _referenceTexture = null;
+        private float _controlStrength = 0.8f;
+
         // 高级选项
         private bool _showAdvanced = false;
         private int _steps;
@@ -89,6 +99,18 @@ namespace AIGCAssetGenerator
             DrawHeader();
             DrawServerStatus();
             EditorGUILayout.Space(10);
+            DrawGenerationModeSwitch();
+            EditorGUILayout.Space(5);
+
+            if (_generationMode == 1)
+            {
+                // 草图精修模式
+                DrawReferenceImageField();
+                EditorGUILayout.Space(5);
+                DrawControlModeSelector();
+                EditorGUILayout.Space(5);
+            }
+
             DrawPromptField();
             EditorGUILayout.Space(5);
             DrawAssetTypeSelector();
@@ -197,6 +219,71 @@ namespace AIGCAssetGenerator
                 _ => ""
             };
             EditorGUILayout.LabelField(typeHint, EditorStyles.miniLabel);
+        }
+
+        private void DrawGenerationModeSwitch()
+        {
+            EditorGUILayout.LabelField("生成模式", EditorStyles.boldLabel);
+            _generationMode = GUILayout.Toolbar(_generationMode, GenerationModeNames, GUILayout.Height(28));
+
+            if (_generationMode == 0)
+                EditorGUILayout.LabelField("纯文字描述 → AI 随机生成图片", EditorStyles.miniLabel);
+            else
+                EditorGUILayout.LabelField("上传参考图（草图/线稿）→ AI 保持结构 + 按描述填充内容", EditorStyles.miniLabel);
+        }
+
+        private void DrawReferenceImageField()
+        {
+            EditorGUILayout.LabelField("参考图（草图/线稿/轮廓）", EditorStyles.boldLabel);
+
+            // ObjectField 拖入/选择 Texture2D
+            _referenceTexture = (Texture2D)EditorGUILayout.ObjectField(
+                "选择参考图",
+                _referenceTexture,
+                typeof(Texture2D),
+                false,
+                GUILayout.Height(18)
+            );
+
+            // 拖入提示
+            if (_referenceTexture == null)
+            {
+                Rect dropArea = GUILayoutUtility.GetRect(0, 60, GUILayout.ExpandWidth(true));
+                GUI.Box(dropArea, "拖入参考图到这里\n（或点击上方选择）");
+            }
+            else
+            {
+                // 预览参考图
+                float previewWidth = Mathf.Min(position.width - 40, 200);
+                float aspect = (float)_referenceTexture.height / _referenceTexture.width;
+                float previewHeight = previewWidth * aspect;
+                Rect previewRect = GUILayoutUtility.GetRect(previewWidth, previewHeight,
+                    GUILayout.MaxWidth(previewWidth), GUILayout.MaxHeight(previewHeight));
+                EditorGUI.DrawPreviewTexture(previewRect, _referenceTexture, null, ScaleMode.ScaleToFit);
+            }
+        }
+
+        private void DrawControlModeSelector()
+        {
+            EditorGUILayout.LabelField("控制方式", EditorStyles.boldLabel);
+            _controlModeIndex = GUILayout.Toolbar(_controlModeIndex, ControlModeNames, GUILayout.Height(25));
+
+            string hint = _controlModeIndex switch
+            {
+                0 => "Canny: 适合线稿/轮廓清晰的草图上色",
+                1 => "Scribble: 适合随手涂鸦 → 概念图生成",
+                2 => "Depth: 适合照片/3D渲染图，保持前后空间关系",
+                _ => ""
+            };
+            EditorGUILayout.LabelField(hint, EditorStyles.miniLabel);
+
+            _controlStrength = EditorGUILayout.Slider("控制力度", _controlStrength, 0.1f, 2.0f);
+            EditorGUILayout.LabelField(
+                _controlStrength < 0.6f ? "  较松: AI 有更多创作自由" :
+                _controlStrength > 1.2f ? "  较紧: 严格贴合参考图结构" :
+                "  适中: 推荐值",
+                EditorStyles.miniLabel
+            );
         }
 
         private void DrawAdvancedOptions()
@@ -334,6 +421,13 @@ namespace AIGCAssetGenerator
                 return;
             }
 
+            // 草图精修模式：必须有参考图
+            if (_generationMode == 1 && _referenceTexture == null)
+            {
+                SetStatus("草图精修模式下需要上传参考图！请拖入一张草图或线稿。", MessageType.Warning);
+                return;
+            }
+
             if (!_serverOnline)
             {
                 SetStatus(
@@ -347,20 +441,44 @@ namespace AIGCAssetGenerator
             _isGenerating = true;
             _generatedTexture = null;
             _lastGeneratedSeed = "";
-            SetStatus("正在生成图片，请耐心等待（通常 5~20 秒）...", MessageType.Info);
+
+            string waitMsg = _generationMode == 0
+                ? "正在生成图片，请耐心等待（通常 5~20 秒）..."
+                : "ControlNet 生成中，首次需下载模型（约 1.4GB），请耐心等待...";
+            SetStatus(waitMsg, MessageType.Info);
 
             try
             {
                 string assetType = AssetTypeNames[_assetTypeIndex];
                 int? seed = _useFixedSeed ? _fixedSeedValue : null;
 
-                _generatedTexture = await AIGCClient.GenerateImage(
-                    prompt: _prompt.Trim(),
-                    assetType: assetType,
-                    seed: seed,
-                    steps: _steps,
-                    guidanceScale: _guidanceScale
-                );
+                if (_generationMode == 0)
+                {
+                    // 文生图（原有接口）
+                    _generatedTexture = await AIGCClient.GenerateImage(
+                        prompt: _prompt.Trim(),
+                        assetType: assetType,
+                        seed: seed,
+                        steps: _steps,
+                        guidanceScale: _guidanceScale
+                    );
+                }
+                else
+                {
+                    // ControlNet 可控生成
+                    string controlMode = _controlModeIndex switch { 0 => "canny", 1 => "scribble", 2 => "depth", _ => "canny" };
+
+                    _generatedTexture = await AIGCClient.GenerateControlled(
+                        referenceImage: _referenceTexture,
+                        prompt: _prompt.Trim(),
+                        controlMode: controlMode,
+                        assetType: assetType,
+                        seed: seed,
+                        steps: _steps,
+                        guidanceScale: _guidanceScale,
+                        controlStrength: _controlStrength
+                    );
+                }
 
                 _lastGeneratedSeed = seed?.ToString() ?? "随机";
                 SetStatus(

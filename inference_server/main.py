@@ -1,18 +1,14 @@
-"""FastAPI 推理服务：接收文字 prompt，返回 AI 生成的图片。
+"""
+FastAPI 推理服务：接收文字 prompt + 可选参考图（ControlNet），返回 AI 生成的图片。
 
 启动方式：
     cd d:\aigc-project\inference_server
     uvicorn main:app --host 127.0.0.1 --port 8000
 
-测试方式：
-    curl -X POST http://127.0.0.1:8000/generate \
-      -H "Content-Type: application/json" \
-      -d '{"prompt": "a game sword icon, fantasy style, masterpiece"}' \
-      -o sword.png
-
 接口说明：
-    POST /generate   → 提交生成请求，返回图片文件
-    GET  /health     → 检查服务是否就绪
+    POST /generate            → txt2img（纯文本生图，向后兼容）
+    POST /generate-controlled  → ControlNet 可控生成（图片 + prompt）
+    GET  /health              → 检查服务是否就绪
 """
 import os
 import sys
@@ -27,23 +23,29 @@ os.environ['HF_ENDPOINT'] = 'https://hf-mirror.com'
 import io
 import time
 import json
+import traceback
 from pathlib import Path
 from datetime import datetime
 
+import numpy as np
 import torch
 from PIL import Image
-from fastapi import FastAPI, HTTPException
-from fastapi.responses import Response, FileResponse
+from fastapi import FastAPI, HTTPException, File, UploadFile, Form
+from fastapi.responses import Response, RedirectResponse
 from pydantic import BaseModel, Field
 
-from model_loader import load_pipeline
+from model_loader import (
+    load_pipeline,
+    get_pipeline,
+    get_controlnet_pipeline,
+    get_available_controlnet_modes,
+)
 
 
 # ===== 常量 =====
 OUTPUT_DIR = Path(__file__).parent / "outputs"
 OUTPUT_DIR.mkdir(exist_ok=True)
 
-# 默认负面提示词 — 屏蔽常见质量问题（畸形手指、低画质、水印等）
 DEFAULT_NEGATIVE = (
     "lowres, bad anatomy, bad hands, text, error, extra digit, "
     "fewer digits, cropped, worst quality, low quality, normal quality, "
@@ -52,35 +54,22 @@ DEFAULT_NEGATIVE = (
 
 
 # ===== 请求/响应模型 =====
+
 class GenerateRequest(BaseModel):
     prompt: str = Field(
         ...,
-        description="正向提示词（英文），描述你想要生成的画面。例如: '1girl, solo, long hair, masterpiece'",
+        description="正向提示词（英文）",
         min_length=1,
         max_length=1000,
     )
     negative_prompt: str = Field(
         default=DEFAULT_NEGATIVE,
-        description="负面提示词，描述你不想要的元素。默认屏蔽低画质、畸形等。",
+        description="负面提示词",
         max_length=1000,
     )
-    steps: int = Field(
-        default=25,
-        description="推理步数。20~30 是推荐范围。越多越精细但越慢。",
-        ge=10,
-        le=100,
-    )
-    guidance_scale: float = Field(
-        default=7.5,
-        description="提示词引导强度。5~10 是推荐范围。越高越贴近 prompt，但过高会失真。",
-        ge=1.0,
-        le=20.0,
-    )
-    seed: int | None = Field(
-        default=None,
-        description="随机种子。留空则每次生成不同；填数字则相同 prompt+seed 生成相同图片。",
-        ge=0,
-    )
+    steps: int = Field(default=25, description="推理步数", ge=10, le=100)
+    guidance_scale: float = Field(default=7.5, description="引导强度", ge=1.0, le=20.0)
+    seed: int | None = Field(default=None, description="随机种子", ge=0)
 
 
 class HealthResponse(BaseModel):
@@ -88,52 +77,138 @@ class HealthResponse(BaseModel):
     model: str
     device: str
     lora_loaded: bool
+    controlnet_modes: list
     uptime_seconds: float
 
 
 # ===== FastAPI 应用 =====
 app = FastAPI(
     title="AIGC LoRA 推理服务",
-    description="用训练好的原神风格 LoRA 生成动漫图片",
-    version="0.1.0",
+    description="用训练好的原神风格 LoRA + ControlNet 生成动漫图片",
+    version="0.2.0",
 )
 
-# 记录启动时间（用于 /health 的 uptime 计算）
 _start_time: float | None = None
 
 
+# ===== 预处理函数 =====
+
+def preprocess_canny(image: Image.Image, low: int = 100, high: int = 200) -> Image.Image:
+    """
+    Canny 边缘检测：提取图片的结构轮廓，作为 ControlNet 的骨架输入。
+
+    大白话：把图片变成「线稿」，AI 照着这个线稿上色。
+    """
+    try:
+        import cv2
+    except ImportError:
+        raise HTTPException(
+            status_code=500,
+            detail="缺少 opencv-python 依赖。请运行: pip install opencv-python"
+        )
+
+    # 转灰度 → Canny 边缘检测
+    img_array = np.array(image.convert("RGB"))
+    gray = cv2.cvtColor(img_array, cv2.COLOR_RGB2GRAY)
+    edges = cv2.Canny(gray, low, high)
+
+    return Image.fromarray(edges)
+
+
+def preprocess_scribble(image: Image.Image) -> Image.Image:
+    """
+    涂鸦/草图预处理：生成类似手绘轮廓的预处理图。
+
+    策略：用 Canny 低阈值多抓边缘 + 高斯模糊 → 模拟手绘感。
+    如果 controlnet_aux 可用，则使用 HED 检测器（效果更好）。
+    """
+    try:
+        from controlnet_aux import HEDdetector
+        hed = HEDdetector.from_pretrained("lllyasviel/Annotators")
+        result = hed(image)
+        if isinstance(result, Image.Image):
+            return result
+        return image
+    except Exception:
+        pass  # 回退到 OpenCV 方案
+
+    import cv2
+    img_array = np.array(image.convert("RGB"))
+    gray = cv2.cvtColor(img_array, cv2.COLOR_RGB2GRAY)
+
+    # 低阈值抓更多边缘 → 模拟草图
+    edges = cv2.Canny(gray, 50, 150)
+    # 轻微模糊，模拟手绘
+    blurred = cv2.GaussianBlur(edges, (3, 3), 0)
+
+    return Image.fromarray(blurred)
+
+
+def preprocess_depth(image: Image.Image) -> Image.Image:
+    """
+    深度图预处理：提取空间深度信息，让 AI 保持物体的空间关系。
+    适合 3D 渲染图/照片 → 保持前后遮挡关系。
+    """
+    try:
+        from controlnet_aux import MidasDetector
+        midas = MidasDetector.from_pretrained("lllyasviel/Annotators")
+        result = midas(image)
+        if isinstance(result, Image.Image):
+            return result
+        return image
+    except Exception:
+        pass
+
+    import cv2
+    img_array = np.array(image.convert("RGB"))
+    gray = cv2.cvtColor(img_array, cv2.COLOR_RGB2GRAY)
+    # 用高斯模糊模拟简单深度（远处模糊 = 近处清晰）
+    depth = cv2.GaussianBlur(gray, (5, 5), 0)
+    return Image.fromarray(depth)
+
+
+PREPROCESSORS = {
+    "canny": preprocess_canny,
+    "scribble": preprocess_scribble,
+    "depth": preprocess_depth,
+}
+
+
 # ===== 启动事件 =====
+
 @app.on_event("startup")
 async def startup():
     """服务启动时加载模型（只加载一次，之后所有请求复用）。"""
     global _start_time
 
     print("=" * 50, flush=True)
-    print("  正在启动 AIGC LoRA 推理服务...", flush=True)
+    print("  正在启动 AIGC 推理服务 (txt2img + ControlNet)...", flush=True)
     print("=" * 50, flush=True)
 
-    # 加载模型（model_loader 内部会自动检测 GPU/CPU、加载 LoRA）
+    # 加载 txt2img 管线（基座模型 + LoRA）
     load_pipeline()
 
     _start_time = time.time()
+
+    available = get_available_controlnet_modes()
     print(f"\n  服务已就绪 → http://127.0.0.1:8000", flush=True)
     print(f"  API 文档 → http://127.0.0.1:8000/docs", flush=True)
+    print(f"  ControlNet 可用: {available}", flush=True)
+    print(f"  首次使用 ControlNet 时会自动下载模型（约 1.4GB），请耐心等待。", flush=True)
     print("=" * 50, flush=True)
 
 
-# ===== 接口 =====
+# ===== txt2img 接口（向后兼容） =====
+
 @app.post("/generate")
 async def generate(req: GenerateRequest):
     """
-    生成图片。
-
-    传入 prompt 和可选参数，返回一张 PNG 图片。
+    纯文本生成图片（原有接口，不受影响）。
 
     - **prompt**: 必须，英文描述。例如 "1girl, raiden shogun, purple eyes, masterpiece"
-    - **negative_prompt**: 可选，不想出现的元素
-    - **steps**: 可选，默认 25（20~30 推荐）
-    - **guidance_scale**: 可选，默认 7.5（5~10 推荐）
-    - **seed**: 可选，固定随机种子以复现相同结果
+    - **steps**: 可选，默认 25
+    - **guidance_scale**: 可选，默认 7.5
+    - **seed**: 可选，固定相同结果
     """
     from model_loader import get_pipeline
 
@@ -141,18 +216,12 @@ async def generate(req: GenerateRequest):
     if pipe is None:
         raise HTTPException(status_code=503, detail="模型尚未加载完成，请稍后重试")
 
-    device = pipe.device
-
-    # 处理随机种子：用户没传就用系统时间戳，保证每次不同
     actual_seed = req.seed if req.seed is not None else int(time.time() * 1000) % (2**31)
-
     print(f"\n[generate] prompt: {req.prompt[:80]}...", flush=True)
     print(f"[generate] steps={req.steps}, cfg={req.guidance_scale}, seed={actual_seed}", flush=True)
 
-    # ---------- 推理 ----------
     try:
-        generator = torch.Generator(device).manual_seed(actual_seed)
-
+        generator = torch.Generator(pipe.device).manual_seed(actual_seed)
         with torch.no_grad():
             result = pipe(
                 prompt=req.prompt,
@@ -161,27 +230,20 @@ async def generate(req: GenerateRequest):
                 guidance_scale=req.guidance_scale,
                 generator=generator,
             )
-
         image: Image.Image = result.images[0]
-
     except torch.cuda.OutOfMemoryError:
-        raise HTTPException(
-            status_code=500,
-            detail="GPU 显存不足。请尝试降低 steps 参数，或重启服务释放显存。",
-        )
+        raise HTTPException(status_code=500, detail="GPU 显存不足。请降低 steps 参数后重试。")
     except Exception as e:
         print(f"[generate] 错误: {e}", flush=True)
         raise HTTPException(status_code=500, detail=f"图片生成失败: {str(e)}")
 
-    # ---------- 存档到本地 ----------
+    # 存档 + 返回
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
     safe_prompt = req.prompt[:30].replace(" ", "_").replace(",", "").replace("/", "_")
     filename = f"{timestamp}_{safe_prompt}.png"
-    save_path = OUTPUT_DIR / filename
-    image.save(save_path)
-    print(f"[generate] 已保存: {save_path}", flush=True)
+    image.save(OUTPUT_DIR / filename)
+    print(f"[generate] 已保存: {OUTPUT_DIR / filename}", flush=True)
 
-    # ---------- 返回图片 ----------
     img_bytes = io.BytesIO()
     image.save(img_bytes, format="PNG")
     img_bytes.seek(0)
@@ -189,40 +251,158 @@ async def generate(req: GenerateRequest):
     return Response(
         content=img_bytes.getvalue(),
         media_type="image/png",
+        headers={"X-Seed": str(actual_seed), "X-Filename": filename},
+    )
+
+
+# ===== ControlNet 可控生成接口 =====
+
+@app.post("/generate-controlled")
+async def generate_controlled(
+    image: UploadFile = File(..., description="参考图（草图/线稿/轮廓），PNG 或 JPG"),
+    prompt: str = Form(..., description="正向提示词（英文）"),
+    control_mode: str = Form("canny", description="控制方式: canny 或 scribble"),
+    steps: int = Form(25, ge=10, le=100),
+    guidance_scale: float = Form(7.5, ge=1.0, le=20.0),
+    control_strength: float = Form(0.8, ge=0.1, le=2.0, description="ControlNet 控制力度，越大越严格贴合参考图"),
+    canny_low: int = Form(100, ge=0, le=255, description="Canny 低阈值"),
+    canny_high: int = Form(200, ge=0, le=255, description="Canny 高阈值"),
+    negative_prompt: str = Form(DEFAULT_NEGATIVE),
+    seed: int | None = Form(None),
+):
+    """
+    可控生成：上传一张参考图，AI 保持其结构骨架，按 prompt 描述填充内容。
+
+    - **image**: 必须，参考图文件
+    - **prompt**: 必须，英文描述
+    - **control_mode**: canny（线稿精修）或 scribble（草图生成）
+    - **control_strength**: 控制力度，0.1=松（更多创意），2.0=紧（严格贴合）
+    """
+    # ---- 1. 读取参考图 ----
+    try:
+        ref_bytes = await image.read()
+        ref_image = Image.open(io.BytesIO(ref_bytes)).convert("RGB")
+    except Exception:
+        raise HTTPException(status_code=400, detail="无法读取参考图，请确认为有效 PNG/JPG 文件。")
+
+    print(f"\n[generate-controlled] prompt: {prompt[:80]}...", flush=True)
+    print(f"[generate-controlled] mode={control_mode}, ref_size={ref_image.size}", flush=True)
+
+    # ---- 2. 预处理（图片 → 结构骨架） ----
+    if control_mode not in PREPROCESSORS:
+        available = list(PREPROCESSORS.keys())
+        raise HTTPException(status_code=400, detail=f"不支持 mode='{control_mode}'。可用: {available}")
+
+    preprocessor = PREPROCESSORS[control_mode]
+    kwargs = {}
+    if control_mode == "canny":
+        kwargs = {"low": canny_low, "high": canny_high}
+
+    try:
+        control_image = preprocessor(ref_image, **kwargs)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"图片预处理失败: {str(e)}")
+
+    print(f"[generate-controlled] 预处理完成, control_image_size={control_image.size}", flush=True)
+
+    # ---- 3. 获取 ControlNet 管线 ----
+    try:
+        pipe = get_controlnet_pipeline(control_mode)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        print(f"[generate-controlled] ControlNet 加载失败: {e}", flush=True)
+        raise HTTPException(status_code=500, detail=f"ControlNet 模型加载失败: {str(e)}")
+
+    # ---- 4. 推理 ----
+    actual_seed = seed if seed is not None else int(time.time() * 1000) % (2**31)
+    print(f"[generate-controlled] steps={steps}, cfg={guidance_scale}, "
+          f"control_strength={control_strength}, seed={actual_seed}", flush=True)
+
+    try:
+        generator = torch.Generator(pipe.device).manual_seed(actual_seed)
+        with torch.no_grad():
+            result = pipe(
+                prompt=prompt,
+                negative_prompt=negative_prompt,
+                image=control_image,
+                num_inference_steps=steps,
+                guidance_scale=guidance_scale,
+                controlnet_conditioning_scale=control_strength,
+                generator=generator,
+            )
+        output_image: Image.Image = result.images[0]
+    except torch.cuda.OutOfMemoryError:
+        raise HTTPException(status_code=500, detail="GPU 显存不足。请降低 steps 参数后重试。")
+    except Exception as e:
+        print(f"[generate-controlled] 推理失败: {traceback.format_exc()}", flush=True)
+        raise HTTPException(status_code=500, detail=f"图片生成失败: {str(e)}")
+
+    # ---- 5. 存档 ----
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+    safe_prompt = prompt[:20].replace(" ", "_").replace(",", "").replace("/", "_")
+
+    # 存原始参考图
+    ref_filename = f"{timestamp}_{control_mode}_ref.png"
+    ref_image.save(OUTPUT_DIR / ref_filename)
+
+    # 存预处理图（方便调试）
+    preproc_filename = f"{timestamp}_{control_mode}_preproc.png"
+    control_image.save(OUTPUT_DIR / preproc_filename)
+
+    # 存生成图
+    out_filename = f"{timestamp}_{control_mode}_{safe_prompt}.png"
+    output_image.save(OUTPUT_DIR / out_filename)
+
+    print(f"[generate-controlled] 已保存: 参考图={ref_filename}, "
+          f"预处理={preproc_filename}, 生成={out_filename}", flush=True)
+
+    # ---- 6. 返回 ----
+    img_bytes = io.BytesIO()
+    output_image.save(img_bytes, format="PNG")
+    img_bytes.seek(0)
+
+    return Response(
+        content=img_bytes.getvalue(),
+        media_type="image/png",
         headers={
             "X-Seed": str(actual_seed),
-            "X-Filename": filename,
+            "X-Filename": out_filename,
+            "X-Preprocess": preproc_filename,
         },
     )
 
 
+# ===== 健康检查 =====
+
 @app.get("/health")
 async def health():
-    """健康检查：返回服务是否就绪、加载了哪个模型、运行了多久。"""
-    from model_loader import get_pipeline
+    """
+    健康检查：返回服务状态、模型信息、ControlNet 可用模式。
+    """
+    from model_loader import get_pipeline, get_loaded_controlnet_modes, get_available_controlnet_modes
 
     pipe = get_pipeline()
     lora_loaded = Path(r"D:\aigc-project\lora_output\adapter_model.safetensors").exists()
-
     uptime = (time.time() - _start_time) if _start_time else 0
 
     return HealthResponse(
         status="ready" if pipe is not None else "loading",
-        model="Counterfeit-V2.5 + LoRA (原神风格)",
+        model="Counterfeit-V2.5 + LoRA (原神风格) + ControlNet",
         device="cuda" if (pipe and str(pipe.device).startswith("cuda")) else "cpu",
         lora_loaded=lora_loaded,
+        controlnet_modes=get_loaded_controlnet_modes() or get_available_controlnet_modes(),
         uptime_seconds=round(uptime, 1),
     )
 
 
 @app.get("/")
 async def root():
-    """根路径重定向到 API 文档"""
-    from fastapi.responses import RedirectResponse
     return RedirectResponse(url="/docs")
 
 
 # ===== 关闭事件 =====
+
 @app.on_event("shutdown")
 async def shutdown():
     """服务关闭时释放 GPU 显存。"""
@@ -241,7 +421,7 @@ if __name__ == "__main__":
     import uvicorn
 
     print("=" * 50, flush=True)
-    print("  AIGC LoRA 推理服务 — 启动中...", flush=True)
+    print("  AIGC 推理服务 (txt2img + ControlNet) — 启动中...", flush=True)
     print("=" * 50, flush=True)
     print("", flush=True)
     print("  也可以双击 start.bat 启动（更简单）", flush=True)

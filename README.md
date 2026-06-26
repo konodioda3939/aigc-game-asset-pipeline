@@ -13,17 +13,17 @@
 
 ## 📖 这是什么？
 
-一个**从文字到游戏资产**的 AI 管线，分三个阶段：
+一个**从文字/草图到游戏资产**的 AI 管线，分四个阶段：
 
 ```
-┌─────────────────┐     ┌──────────────────┐     ┌─────────────────┐
-│  阶段 1          │ ──→ │  阶段 2           │ ──→ │  阶段 3          │
-│  LoRA 风格微调   │     │  Python 推理 API  │     │  Unity 编辑器插件 │
-│                 │     │                  │     │                 │
-│  48张原神图      │     │  FastAPI 本地服务  │     │  窗口输入文字     │
-│  → 训练 LoRA    │     │  接收 prompt      │     │  → AI 生成图片   │
-│  → 学会原神风格  │     │  → 返回 PNG 图片  │     │  → 导入为资产    │
-└─────────────────┘     └──────────────────┘     └─────────────────┘
+┌─────────────┐   ┌──────────────┐   ┌─────────────────┐   ┌─────────────────┐
+│  阶段 1      │──→│  阶段 2       │──→│  阶段 3          │──→│  阶段 4          │
+│  LoRA 微调   │   │  Python API  │   │  Unity 插件      │   │  ControlNet      │
+│             │   │              │   │                 │   │  可控生成         │
+│  48张原神图  │   │  FastAPI     │   │  窗口输入文字     │   │  草图/线稿        │
+│  → 训练 LoRA│   │  /generate   │   │  → AI 生成图片   │   │  → AI 精修上色   │
+│  → 原神风格  │   │  → PNG 图片  │   │  → 导入为资产    │   │  → 保持结构不变   │
+└─────────────┘   └──────────────┘   └─────────────────┘   └─────────────────┘
 ```
 
 **一句话总结**：在 Unity 里打开窗口，输入「一把金色长剑」，点按钮，10 秒后图片出现在项目资源里，拖到场景就能用。
@@ -44,6 +44,8 @@
 aigc-project/
 ├── README.md                       ← 📖 本文件
 ├── CLAUDE.md                       ← AI 协作指南
+├── ControlNet阶段总结.md            ← ControlNet 阶段总结
+├── ControlNet 可控生成 — 实施计划.md ← ControlNet 原始计划
 │
 ├── data/
 │   ├── style_images/               ← 48张原始参考图（原神角色 AI 绘图）
@@ -56,16 +58,17 @@ aigc-project/
 │   └── comparison/                 ← 有无 LoRA 对比图
 │
 ├── inference_server/
-│   ├── main.py                     ← FastAPI 入口（/generate + /health）
-│   ├── model_loader.py             ← SD + LoRA 加载器（全局单例）
+│   ├── main.py                     ← FastAPI 入口（/generate + /generate-controlled + /health）
+│   ├── model_loader.py             ← SD + LoRA + ControlNet 加载器（全局单例）
 │   ├── start.bat                   ← 🚀 双击启动脚本
 │   ├── requirements.txt            ← Python 依赖
-│   └── outputs/                    ← 生成图片存档
+│   ├── install_controlnet.bat      ← ControlNet 依赖安装
+│   └── outputs/                    ← 生成图片存档（含参考图/预处理图/生成图）
 │
 ├── unity_plugin/
 │   └── Assets/Editor/AIGCAssetGenerator/
-│       ├── AIGCWindow.cs           ← Editor 窗口 UI
-│       ├── AIGCClient.cs           ← HTTP 客户端
+│       ├── AIGCWindow.cs           ← Editor 窗口 UI（文生图 + 草图精修）
+│       ├── AIGCClient.cs           ← HTTP 客户端（/generate + /generate-controlled）
 │       ├── AssetImporter.cs        ← 资产导入
 │       └── AIGCSettings.cs         ← Preferences 配置
 │
@@ -165,17 +168,30 @@ adapter_model.safetensors (12.2 MB)
 
 | 接口 | 方法 | 说明 |
 |------|------|------|
-| `/generate` | POST | 传入 prompt，返回 PNG 图片 |
+| `/generate` | POST | 传入 prompt，返回 PNG 图片（纯文本生图） |
+| `/generate-controlled` | POST | 上传参考图 + prompt，返回 AI 精修图（草图/线稿 → 成品） |
 | `/health` | GET | 服务状态检测 |
 | `/docs` | GET | Swagger 可视化文档（可手动测试） |
 
-**请求参数**：
+**`/generate` 请求参数**：
 
 | 参数 | 默认值 | 说明 |
 |------|--------|------|
 | `prompt` | 必填 | 英文描述，最长 1000 字符 |
 | `steps` | 25 | 推理步数（10~100） |
 | `guidance_scale` | 7.5 | 引导强度（1~20） |
+| `seed` | 随机 | 固定种子可复现 |
+
+**`/generate-controlled` 请求参数**（新增）：
+
+| 参数 | 默认值 | 说明 |
+|------|--------|------|
+| `image` | 必填 | 参考图文件（PNG/JPG） |
+| `prompt` | 必填 | 英文描述 |
+| `control_mode` | `"canny"` | 控制方式：`canny` / `scribble` / `depth` |
+| `steps` | 25 | 推理步数 |
+| `guidance_scale` | 7.5 | 引导强度 |
+| `control_strength` | 0.8 | 控制力度（0.1~2.0） |
 | `seed` | 随机 | 固定种子可复现 |
 
 **测试性能**（RTX 4060 Laptop, 512×512, 25 steps）：
@@ -230,8 +246,8 @@ adapter_model.safetensors (12.2 MB)
 
 | 文件 | 职责 |
 |------|------|
-| `AIGCWindow.cs` | Editor 窗口 UI（菜单入口、输入框、预览、按钮） |
-| `AIGCClient.cs` | HTTP 通信（调用 Python 服务的 `/generate` 接口） |
+| `AIGCWindow.cs` | Editor 窗口 UI（文生图 + 草图精修双模式、输入框、预览、按钮） |
+| `AIGCClient.cs` | HTTP 通信（`/generate` + `/generate-controlled` 接口） |
 | `AssetImporter.cs` | 图片 → PNG → Unity 资产（自动命名、纹理导入配置） |
 | `AIGCSettings.cs` | 全局配置（Preferences 面板，API 地址/默认参数） |
 
@@ -242,6 +258,43 @@ adapter_model.safetensors (12.2 MB)
 - 生成异步不卡 Editor UI
 - 导入自动配置 sRGB、FilterMode、WrapMode
 - 重名自动编号（chest → chest_001 → chest_002）
+
+---
+
+### 阶段 4：ControlNet 可控生成 🆕
+
+**目标**：在文本生图基础上，增加「草图/线稿 → AI 精修」的可控生成能力。
+
+**三种控制方式**：
+
+| 模式 | 用途 | 举例 |
+|------|------|------|
+| **Canny 线稿精修** | 清晰轮廓/线稿 → 保持结构上色 | 画出武器轮廓 → AI 生成精修版游戏图标 |
+| **Scribble 草图生成** | 随手涂鸦 → 概念图 | 涂鸦建筑轮廓 → AI 生成完整场景图 |
+| **Depth 深度保持** | 照片/3D图 → 保持前后空间关系 | 3D 白模截图 → AI 生成带材质的场景 |
+
+**流程**：
+
+```text
+用户上传参考图 (Unity 拖入或 API 上传)
+       ↓
+服务端自动预处理（Canny 提取线稿 / Scribble / Depth 提取深度）
+       ↓
+ControlNet + 融合了 LoRA 的 UNet → 生成精修图
+       ↓
+返回 PNG + 自动存档（参考图、预处理图、生成图各一份）
+```
+
+**设计亮点**：
+
+- 与 txt2img 管线共享 UNet/VAE/TextEncoder，不重复占显存
+- 三模式合计最大约 4.2GB（8GB 显存轻松跑）
+- 三级下载策略（ModelScope → HF 镜像 → HF 直连），国内网络友好
+- 模型下载一次后本地缓存，重启秒加载、不联网
+- 每个模式仅需 ~725MB（fp16），按需下载不浪费
+- Unity 插件支持模式切换 + 参考图拖入 + 实时预览
+
+> 📖 详细文档见 [ControlNet阶段总结.md](./ControlNet阶段总结.md)
 
 ---
 
@@ -261,10 +314,12 @@ adapter_model.safetensors (12.2 MB)
 
 ## 🎯 下一步
 
-- [ ] 批量生成（多种子变体，挑最好的）
+- [ ] 训练自己的 ControlNet（用游戏素材风格，更贴合项目需求）
+- [ ] 图片转 3D 模型（3D 内容生成）
+- [ ] PBR 材质批量生成（游戏生产中实际表现）
+- [ ] 批量生成 + 多种子变体（一次生成多张，挑最好的）
 - [ ] 训练更多风格 LoRA（科幻、像素、卡通）
 - [ ] 图片后期处理（背景去除、亮度调整）
-- [ ] ComfyUI 工作流集成
 - [ ] Web 前端（非 Unity 用户也能用）
 
 ---

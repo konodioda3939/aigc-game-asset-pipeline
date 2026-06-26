@@ -1,4 +1,4 @@
-"""模型加载器：加载Stable Diffusion + LoRA权重，全局只加载一次，复用管线。"""
+"""模型加载器：加载Stable Diffusion + LoRA权重 + ControlNet，全局只加载一次，复用管线。"""
 import os
 import sys
 
@@ -8,109 +8,400 @@ sys.stderr.reconfigure(encoding='utf-8', errors='replace')
 
 # ==== 必须在 import diffusers 之前设置，否则连不上 HuggingFace ====
 os.environ['HF_ENDPOINT'] = 'https://hf-mirror.com'
+# 大文件下载超时设为 10 分钟（默认太短，1.4GB 容易超时断连）
+os.environ['HF_HUB_DOWNLOAD_TIMEOUT'] = '600'
 
 import torch
 from pathlib import Path
-from diffusers import StableDiffusionPipeline, DPMSolverMultistepScheduler
+from diffusers import (
+    StableDiffusionPipeline,
+    StableDiffusionControlNetPipeline,
+    ControlNetModel,
+    DPMSolverMultistepScheduler,
+)
 from peft import PeftModel
 
 
 # ===== 配置 =====
-# 基座模型：动漫专用 SD 1.5
 MODEL_NAME = "gsdf/Counterfeit-V2.5"
-
-# LoRA 权重路径（里程碑1训练产出）
-# 用户预期文件名可能是 pytorch_lora_weights.safetensors，实际文件是 adapter_model.safetensors
 LORA_DIR = Path(r"D:\aigc-project\lora_output")
-
-# 模型缓存目录（和训练脚本共用，避免重复下载）
 CACHE_DIR = Path(r"D:\aigc-project\cache\hub")
+
+# ControlNet 模型 HuggingFace ID 映射
+# ControlNet 模型 ID
+# modelscope: 国内镜像，优先使用（大文件下载更稳）
+# hf: HuggingFace 原版，作为备选
+CONTROLNET_MODEL_SOURCES = {
+    "canny": {
+        "modelscope": "AI-ModelScope/control_v11p_sd15_canny",
+        "hf": "lllyasviel/sd-controlnet-canny",
+    },
+    "scribble": {
+        "modelscope": "AI-ModelScope/control_v11p_sd15_scribble",
+        "hf": "lllyasviel/sd-controlnet-scribble",
+    },
+    "depth": {
+        # ModelScope 上不存在 control_v11p_sd15_depth，设为 None 跳过
+        "modelscope": None,
+        "hf": "lllyasviel/sd-controlnet-depth",
+    },
+}
 
 
 # ===== 全局单例 =====
-_pipeline = None  # 加载一次，整个服务生命周期复用
+_device = None       # "cuda" 或 "cpu"
+_dtype = None        # torch.float16 或 torch.float32
 
+_pipeline = None     # txt2img 管线（向后兼容）
+_shared_components = None  # dict(vae, text_encoder, tokenizer, unet, scheduler)，ControlNet 共享
+
+_controlnet_models = {}     # mode → ControlNetModel
+_controlnet_pipelines = {}  # mode → StableDiffusionControlNetPipeline
+
+
+# ===== 设备检测 =====
+
+def _detect_device():
+    """检测 GPU/CPU，返回 (device_str, torch_dtype)。"""
+    global _device, _dtype
+    if _device is not None:
+        return _device, _dtype
+
+    if torch.cuda.is_available():
+        _device = "cuda"
+        _dtype = torch.float16
+        print(f"[model_loader] 使用 GPU: {torch.cuda.get_device_name(0)}", flush=True)
+        vram = torch.cuda.get_device_properties(0).total_memory / 1024**3
+        print(f"[model_loader] 显存: {vram:.1f} GB", flush=True)
+    else:
+        _device = "cpu"
+        _dtype = torch.float32
+        print("[model_loader] ⚠️ 未检测到 GPU，使用 CPU（生成会较慢）", flush=True)
+
+    return _device, _dtype
+
+
+# ===== txt2img 管线（向后兼容） =====
 
 def load_pipeline() -> StableDiffusionPipeline:
     """
-    加载 Stable Diffusion 管线 + LoRA 权重。
-
-    流程：
-    1. 加载 Counterfeit-V2.5 基座模型（动漫专用 SD 1.5）
-    2. 通过 PEFT 挂载已训练的 LoRA 权重
-    3. 将 LoRA 融合进 UNet（merge_and_unload），变成标准 UNet
-    4. 配置 DPMSolver 调度器（比默认 Euler 收敛更快）
-
-    返回：
-        配置好的 StableDiffusionPipeline，可直接调用生成图片
-
-    说明：
-        这个函数只在服务启动时调用一次，之后全局复用管线对象。
-        LoRA 融合到 UNet 后，推理速度和不加 LoRA 一样快。
+    加载 txt2img 管线 + LoRA 权重。
+    服务启动时调用一次，之后全局复用。
     """
-    global _pipeline
+    global _pipeline, _shared_components
 
-    # 如果已经加载过，直接返回（服务重启前一直有效）
     if _pipeline is not None:
-        print("[model_loader] 管线已加载，复用现有实例。", flush=True)
+        print("[model_loader] txt2img 管线已加载，复用现有实例。", flush=True)
         return _pipeline
 
-    # ---------- 检测运行设备 ----------
-    if torch.cuda.is_available():
-        device = "cuda"
-        dtype = torch.float16
-        print(f"[model_loader] 使用 GPU: {torch.cuda.get_device_name(0)}", flush=True)
-        print(f"[model_loader] 显存: {torch.cuda.get_device_properties(0).total_memory / 1024**3:.1f} GB", flush=True)
-    else:
-        device = "cpu"
-        dtype = torch.float32
-        print("[model_loader] ⚠️ 未检测到 GPU，使用 CPU（生成会较慢）", flush=True)
+    device, dtype = _detect_device()
 
-    # ---------- 加载基座模型 ----------
+    # --- 加载基座模型 ---
     print(f"[model_loader] 正在加载基座模型: {MODEL_NAME} ...", flush=True)
-    print(f"[model_loader] 缓存目录: {CACHE_DIR}", flush=True)
-
     pipe = StableDiffusionPipeline.from_pretrained(
         MODEL_NAME,
         torch_dtype=dtype,
-        safety_checker=None,          # 禁用安全检查器（动漫图不需要，也省显存）
+        safety_checker=None,
         cache_dir=str(CACHE_DIR),
     )
-
-    # 使用 DPMSolver 调度器 — 比默认 DDPM 快 2-3 倍，25 步就能出好图
     pipe.scheduler = DPMSolverMultistepScheduler.from_config(pipe.scheduler.config)
-
     print("[model_loader] 基座模型加载完成。", flush=True)
 
-    # ---------- 加载 LoRA 权重 ----------
+    # --- 加载 LoRA 权重 ---
     lora_weights = LORA_DIR / "adapter_model.safetensors"
     if lora_weights.exists():
         print(f"[model_loader] 正在加载 LoRA 权重: {lora_weights}", flush=True)
-
-        # PEFT 方式加载：在 UNet 上挂 LoRA 适配器，然后融合进基础权重
-        # 不能用 pipe.load_lora_weights() — PEFT 保存的 key 命名格式不兼容
         unet = PeftModel.from_pretrained(pipe.unet, str(LORA_DIR))
-        pipe.unet = unet.merge_and_unload()          # 融合：把 LoRA 增量融进 UNet 原始权重
-        pipe.unet = pipe.unet.to(device, dtype=dtype)  # 移回设备
-
+        pipe.unet = unet.merge_and_unload()
+        pipe.unet = pipe.unet.to(device, dtype=dtype)
         print("[model_loader] LoRA 权重已融合进 UNet。", flush=True)
     else:
-        print(f"[model_loader] ⚠️ 未找到 LoRA 权重文件: {lora_weights}", flush=True)
-        print("[model_loader] 将使用基座模型（无风格微调）生成。", flush=True)
+        print("[model_loader] ⚠️ 未找到 LoRA 权重文件", flush=True)
 
-    # ---------- 移到设备 + 优化 ----------
+    # --- 移到设备 + 优化 ---
     pipe = pipe.to(device)
-    pipe.enable_attention_slicing()  # 省显存：把注意力计算切成小块，8GB 卡也能跑
+    pipe.enable_attention_slicing()
 
-    print(f"[model_loader] 管线就绪，设备: {device}, 精度: {dtype}", flush=True)
-    print(f"[model_loader] 默认参数: steps=25, guidance_scale=7.5, size=512×512", flush=True)
+    # --- 保存共享组件（供 ControlNet 管线复用 UNet/VAE/TextEncoder） ---
+    _shared_components = {
+        "vae": pipe.vae,
+        "text_encoder": pipe.text_encoder,
+        "tokenizer": pipe.tokenizer,
+        "unet": pipe.unet,          # ← 已融合 LoRA 的 UNet
+        "scheduler": pipe.scheduler,
+    }
 
     _pipeline = pipe
+    print(f"[model_loader] txt2img 管线就绪。", flush=True)
     return _pipeline
 
 
 def get_pipeline() -> StableDiffusionPipeline | None:
-    """获取已加载的管线（如果还没加载，会自动加载）。"""
+    """获取 txt2img 管线实例。"""
     if _pipeline is None:
         return load_pipeline()
     return _pipeline
+
+
+# ===== ControlNet 管线 =====
+
+def _download_via_modelscope(model_id: str, cache_dir: Path) -> str | None:
+    """
+    通过 ModelScope（国内 AI 模型库）下载模型，返回本地路径。
+    失败返回 None。
+    """
+    try:
+        from modelscope.hub.snapshot_download import snapshot_download
+        local_path = snapshot_download(model_id, cache_dir=str(cache_dir))
+        return local_path
+    except Exception as e:
+        print(f"[model_loader] ModelScope 下载失败: {e}", flush=True)
+        return None
+
+
+def _download_and_load_controlnet(
+    hf_id: str,
+    dtype: torch.dtype,
+    use_mirror: bool = True,
+    max_retries: int = 10,
+) -> ControlNetModel | None:
+    """
+    健壮的 ControlNet 下载 + 加载。
+
+    只下载必需的两个文件（config.json + 一个权重文件），而非整个仓库。
+    优先下载 fp16 版本（~725MB），比完整仓库（~2.9GB）省 75% 流量和时间。
+
+    参数：
+      use_mirror: True=走镜像, False=直连 huggingface.co
+    返回：
+      ControlNetModel 实例，或 None（所有尝试均失败）
+    """
+    from huggingface_hub.utils import EntryNotFoundError
+
+    # --- 如果直连，临时覆盖 HF_ENDPOINT ---
+    saved_endpoint = os.environ.get("HF_ENDPOINT")
+    if not use_mirror and saved_endpoint:
+        os.environ.pop("HF_ENDPOINT", None)
+        print("[model_loader] 已切换为直连 huggingface.co（不走镜像）", flush=True)
+
+    try:
+        local_dir = CACHE_DIR / "controlnet" / hf_id.replace("/", "--")
+        local_dir = Path(str(local_dir))
+        local_dir.mkdir(parents=True, exist_ok=True)
+
+        # 检测是否已下载完成
+        already_downloaded = (
+            (local_dir / "config.json").exists()
+            and any(local_dir.glob("*.safetensors"))
+        )
+
+        if not already_downloaded:
+            # 只下载必需文件（config.json + 一个权重文件）
+            # 优先 fp16（~725MB），不存在则回退 fp32（~1.45GB）
+            # 比 snapshot_download 全仓库下载（~2.9GB）省一半以上
+            weight_file = "diffusion_pytorch_model.fp16.safetensors"
+            print(f"[model_loader] 正在下载模型（优先 fp16 ~725MB）...", flush=True)
+
+            # 下载 config.json（几 KB，秒下）
+            _download_single_file(hf_id, "config.json", local_dir, max_retries)
+            print(f"[model_loader] config.json 下载完成。", flush=True)
+
+            # 下载权重文件（~725MB fp16 或 ~1.45GB fp32）
+            try:
+                _download_single_file(hf_id, weight_file, local_dir, max_retries)
+            except EntryNotFoundError:
+                # fp16 不存在，回退到 fp32
+                weight_file = "diffusion_pytorch_model.safetensors"
+                print(f"[model_loader] fp16 版本不存在，改下 fp32（~1.45GB）...", flush=True)
+                _download_single_file(hf_id, weight_file, local_dir, max_retries)
+            except Exception:
+                # 其他错误也尝试 fp32 回退
+                weight_file = "diffusion_pytorch_model.safetensors"
+                print(f"[model_loader] fp16 下载失败，尝试 fp32 版本...", flush=True)
+                _download_single_file(hf_id, weight_file, local_dir, max_retries)
+
+            print(f"[model_loader] 权重文件下载完成。", flush=True)
+
+        # --- 从本地加载模型 ---
+        print(f"[model_loader] 正在加载 ControlNet 模型权重...", flush=True)
+        controlnet = ControlNetModel.from_pretrained(
+            str(local_dir),
+            torch_dtype=dtype,
+            local_files_only=True,
+        )
+        print(f"[model_loader] ControlNet 模型加载成功。", flush=True)
+        return controlnet
+
+    except Exception as e:
+        print(f"[model_loader] 加载失败: {e}", flush=True)
+        return None
+
+    finally:
+        # --- 恢复环境变量 ---
+        if not use_mirror:
+            if saved_endpoint:
+                os.environ["HF_ENDPOINT"] = saved_endpoint
+            else:
+                os.environ.pop("HF_ENDPOINT", None)
+            os.environ['HF_HUB_DOWNLOAD_TIMEOUT'] = '600'
+
+
+def _download_single_file(
+    repo_id: str,
+    filename: str,
+    local_dir: Path,
+    max_retries: int = 10,
+):
+    """
+    下载单个 HF 文件，带重试 + 断点续传。
+
+    hf_hub_download 默认启用 resume_download，
+    下载中断后重试会自动从断点继续。
+    """
+    import time
+    from huggingface_hub import hf_hub_download
+
+    last_error = None
+    for attempt in range(1, max_retries + 1):
+        try:
+            hf_hub_download(
+                repo_id=repo_id,
+                filename=filename,
+                local_dir=str(local_dir),
+                resume_download=True,
+            )
+            return  # 成功
+        except Exception as e:
+            last_error = e
+            if attempt < max_retries:
+                wait = min(2 ** attempt, 120)
+                print(f"[model_loader] {filename} 下载失败 (尝试 {attempt}/{max_retries}): "
+                      f"{str(e)[:150]}", flush=True)
+                print(f"[model_loader] {wait} 秒后重试...", flush=True)
+                time.sleep(wait)
+
+    raise last_error
+
+
+def load_controlnet_model(control_mode: str) -> ControlNetModel:
+    """
+    加载 ControlNet 模型（优先 ModelScope 国内镜像，备选 HuggingFace）。
+    """
+    if control_mode not in CONTROLNET_MODEL_SOURCES:
+        raise ValueError(
+            f"不支持的 ControlNet 模式: '{control_mode}'。"
+            f"可用: {list(CONTROLNET_MODEL_SOURCES.keys())}"
+        )
+
+    if control_mode in _controlnet_models:
+        return _controlnet_models[control_mode]
+
+    device, dtype = _detect_device()
+    sources = CONTROLNET_MODEL_SOURCES[control_mode]
+
+    # --- 策略 1：优先尝试 ModelScope（国内网络友好）---
+    modelscope_id = sources.get("modelscope")
+    if modelscope_id:
+        print(f"[model_loader] 通过 ModelScope 下载: {modelscope_id} ...", flush=True)
+        local_path = _download_via_modelscope(modelscope_id, CACHE_DIR / "modelscope")
+        if local_path:
+            print(f"[model_loader] ModelScope 下载完成: {local_path}", flush=True)
+            controlnet = ControlNetModel.from_pretrained(
+                local_path, torch_dtype=dtype,
+            )
+            _controlnet_models[control_mode] = controlnet
+            print(f"[model_loader] ControlNet [{control_mode}] 加载完成。", flush=True)
+            return controlnet
+        print("[model_loader] ModelScope 下载失败，尝试 HuggingFace 镜像...", flush=True)
+
+    # --- 策略 2：HuggingFace 镜像下载（先下载文件到本地，再加载）---
+    hf_id = sources["hf"]
+    print(f"[model_loader] 通过 HuggingFace 下载: {hf_id} ...", flush=True)
+
+    controlnet = _download_and_load_controlnet(hf_id, dtype, use_mirror=True)
+
+    if controlnet is None:
+        # --- 策略 3：直连 HuggingFace（不走镜像），作为最后兜底 ---
+        print("[model_loader] 镜像所有尝试均失败，尝试直连 HuggingFace（不走镜像）...", flush=True)
+        controlnet = _download_and_load_controlnet(hf_id, dtype, use_mirror=False)
+
+    if controlnet is None:
+        raise RuntimeError(
+            f"\n{'='*60}\n"
+            f"  ControlNet '{control_mode}' 下载失败（所有策略均失败）\n"
+            f"{'='*60}\n"
+            f"\n"
+            f"  已尝试：\n"
+            f"    1. ModelScope 国内镜像\n"
+            f"    2. HuggingFace 镜像 (hf-mirror.com，10 次重试)\n"
+            f"    3. HuggingFace 直连 (huggingface.co，10 次重试)\n"
+            f"\n"
+            f"  手动解决方案：\n"
+            f"    方式 A（推荐）：换个网络好的时段，重启服务自动重试\n"
+            f"    方式 B：手动下载后放入指定目录\n"
+            f"      → 浏览器打开 https://huggingface.co/{hf_id}\n"
+            f"      → 下载 diffusion_pytorch_model.safetensors 和 config.json\n"
+            f"      → 放入 {CACHE_DIR / 'controlnet' / hf_id.replace('/', '--')}\n"
+            f"      → 重启服务即可\n"
+            f"{'='*60}\n"
+        )
+
+    _controlnet_models[control_mode] = controlnet
+    print(f"[model_loader] ControlNet [{control_mode}] 加载完成。", flush=True)
+    return controlnet
+
+
+def get_controlnet_pipeline(control_mode: str = "canny") -> StableDiffusionControlNetPipeline:
+    """
+    获取 ControlNet 管线。
+
+    与 txt2img 管线共享 UNet/VAE/TextEncoder/Tokenizer/Scheduler，
+    不会重复占用显存。ControlNet 模型本身约 1.4GB（fp16）。
+
+    用法：
+        pipe = get_controlnet_pipeline("canny")
+        result = pipe(prompt=..., image=canny_preprocessed_image, ...)
+    """
+    # 确保基础组件已加载
+    if _shared_components is None:
+        load_pipeline()
+
+    # 已有同模式管线，直接返回
+    if control_mode in _controlnet_pipelines:
+        return _controlnet_pipelines[control_mode]
+
+    # 加载 ControlNet 模型
+    controlnet = load_controlnet_model(control_mode)
+    device, _ = _detect_device()
+
+    # 用共享组件 + ControlNet 创建新管线
+    comps = _shared_components
+    pipe = StableDiffusionControlNetPipeline(
+        vae=comps["vae"],
+        text_encoder=comps["text_encoder"],
+        tokenizer=comps["tokenizer"],
+        unet=comps["unet"],            # ← 复用已融合 LoRA 的 UNet
+        controlnet=controlnet,
+        scheduler=comps["scheduler"],
+        safety_checker=None,
+        feature_extractor=None,
+        requires_safety_checker=False,
+    )
+    # 显式调用 .to() 确保管线内部设备标记正确（组件已在 GPU 上，不会重复转移）
+    pipe = pipe.to(device)
+
+    # ControlNet 管线不需要 attention_slicing（UNet 已配置过）
+
+    _controlnet_pipelines[control_mode] = pipe
+    print(f"[model_loader] ControlNet 管线 [{control_mode}] 就绪。", flush=True)
+    return pipe
+
+
+def get_loaded_controlnet_modes() -> list:
+    """返回已加载的 ControlNet 模式列表。"""
+    return list(_controlnet_pipelines.keys())
+
+
+def get_available_controlnet_modes() -> list:
+    """返回所有支持的 ControlNet 模式列表。"""
+    return list(CONTROLNET_MODEL_SOURCES.keys())
