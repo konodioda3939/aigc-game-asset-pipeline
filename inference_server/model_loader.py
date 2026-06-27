@@ -41,16 +41,16 @@ CACHE_DIR = Path(r"D:\aigc-project\cache\hub")
 # hf: HuggingFace 原版，作为备选
 CONTROLNET_MODEL_SOURCES = {
     "canny": {
-        "modelscope": "AI-ModelScope/control_v11p_sd15_canny",
+        # ModelScope 直接使用 HuggingFace 同款 ID（不用 AI-ModelScope/ 前缀）
+        "modelscope": "lllyasviel/control_v11p_sd15_canny",
         "hf": "lllyasviel/sd-controlnet-canny",
     },
     "scribble": {
-        "modelscope": "AI-ModelScope/control_v11p_sd15_scribble",
+        "modelscope": "lllyasviel/control_v11p_sd15_scribble",
         "hf": "lllyasviel/sd-controlnet-scribble",
     },
     "depth": {
-        # ModelScope 上不存在 control_v11p_sd15_depth，设为 None 跳过
-        "modelscope": None,
+        "modelscope": "lllyasviel/control_v11f1p_sd15_depth",
         "hf": "lllyasviel/sd-controlnet-depth",
     },
 }

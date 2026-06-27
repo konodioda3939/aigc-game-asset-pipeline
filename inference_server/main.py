@@ -95,6 +95,35 @@ _start_time: float | None = None
 
 # ===== 预处理函数 =====
 
+# SD 1.5 原生分辨率 512×512，超过 768 后显存和速度急剧恶化
+# 8GB 显存参考：512=~2s/步, 768=~5s/步, 1024=~26s/步（可能触发系统内存交换）
+DEFAULT_CONTROLNET_MAX_SIZE = 768
+# VAE 要求尺寸为 8 的倍数
+_LATENT_ALIGN = 8
+
+
+def _resize_for_controlnet(image: Image.Image, max_size: int = DEFAULT_CONTROLNET_MAX_SIZE) -> Image.Image:
+    """
+    将输入图缩放到适合 SD 1.5 + ControlNet 处理的尺寸。
+
+    保持宽高比，长边不超过 max_size，尺寸对齐到 8 的倍数（VAE 要求）。
+    1024×1024 → 768×768（速度提升约 5 倍，显存安全）。
+    """
+    w, h = image.size
+    longest = max(w, h)
+    if longest <= max_size:
+        return image  # 已经够小，不需要缩放
+
+    scale = max_size / longest
+    new_w = int(w * scale)
+    new_h = int(h * scale)
+    # 对齐到 8 的倍数（VAE 编码器要求）
+    new_w = (new_w // _LATENT_ALIGN) * _LATENT_ALIGN
+    new_h = (new_h // _LATENT_ALIGN) * _LATENT_ALIGN
+    print(f"[generate-controlled] 自动缩放: {w}×{h} → {new_w}×{new_h} "
+          f"（SD 1.5 原生 512×512，过大图片会极慢）", flush=True)
+    return image.resize((new_w, new_h), Image.LANCZOS)
+
 def preprocess_canny(image: Image.Image, low: int = 100, high: int = 200) -> Image.Image:
     """
     Canny 边缘检测：提取图片的结构轮廓，作为 ControlNet 的骨架输入。
@@ -267,6 +296,7 @@ async def generate_controlled(
     steps: int = Form(25, ge=10, le=100),
     guidance_scale: float = Form(7.5, ge=1.0, le=20.0),
     control_strength: float = Form(0.8, ge=0.1, le=2.0, description="ControlNet 控制力度，越大越严格贴合参考图"),
+    max_size: int = Form(DEFAULT_CONTROLNET_MAX_SIZE, ge=512, le=1024, description="输入图最大边长（SD 1.5 建议 768，过大显存爆炸）"),
     canny_low: int = Form(100, ge=0, le=255, description="Canny 低阈值"),
     canny_high: int = Form(200, ge=0, le=255, description="Canny 高阈值"),
     negative_prompt: str = Form(DEFAULT_NEGATIVE),
@@ -279,6 +309,8 @@ async def generate_controlled(
     - **prompt**: 必须，英文描述
     - **control_mode**: canny（线稿精修）或 scribble（草图生成）
     - **control_strength**: 控制力度，0.1=松（更多创意），2.0=紧（严格贴合）
+    - **max_size**: 输入图最大边长（默认 768）。SD 1.5 原生 512×512，
+      过大会导致极慢甚至显存不足，服务会自动缩放
     """
     # ---- 1. 读取参考图 ----
     try:
@@ -289,6 +321,9 @@ async def generate_controlled(
 
     print(f"\n[generate-controlled] prompt: {prompt[:80]}...", flush=True)
     print(f"[generate-controlled] mode={control_mode}, ref_size={ref_image.size}", flush=True)
+
+    # ---- 1.5 缩放输入图（SD 1.5 原生 512×512，过大图片极慢且可能 OOM）----
+    ref_image = _resize_for_controlnet(ref_image, max_size)
 
     # ---- 2. 预处理（图片 → 结构骨架） ----
     if control_mode not in PREPROCESSORS:
