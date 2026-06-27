@@ -336,7 +336,7 @@ Unity：写入 Assets/ → ModelImporter → 自动创建 Prefab → Ping 到 Pr
 
 **设计亮点**：
 
-- 三级下载策略（ModelScope → HF 镜像 → HF 直连），国内网络友好
+- 下载与缓存策略同 Stage 4（ModelScope → HF 镜像 → HF 直连），模型缓存复用
 - HF 权重键名自动转换（适配新版 ViT 架构）
 - torchmcubes 用 CPU 兼容层替代（skimage），无需 Visual Studio 编译
 - 渲染器分块处理（chunk_size=4096），8GB 显存安全
@@ -357,17 +357,18 @@ Unity：写入 Assets/ → ModelImporter → 自动创建 Prefab → Ping 到 Pr
 
 ## 🛠️ 技术栈
 
-| 层级 | 技术 | 用途 |
-|------|------|------|
-| 深度学习框架 | PyTorch 2.x + CUDA | 模型训练与推理 |
-| 模型生态 | HuggingFace Diffusers + PEFT | SD 管线 + LoRA |
-| 基座模型 | Counterfeit-V2.5 | 动漫专用 SD 1.5 微调 |
-| ControlNet | Canny / Scribble / Depth | 草图 → 精修 |
-| 3D 重建 | TripoSR（Stability AI） | 单图 → 带贴图 3D mesh |
-| 打标模型 | WD SwinV2 Tagger v3 (ONNX) | 图像自动标签 |
-| 推理服务 | FastAPI + Uvicorn | HTTP API |
-| 游戏引擎 | Unity 2022.3 LTS | Editor 插件 + 资产导入 |
-| GPU | NVIDIA RTX 4060 Laptop (8GB) | 本地推理 |
+> 顶部 badges 为快速概览，下表补充各技术在管线中的具体角色：
+
+| 层级 | 技术 | 在管线中的角色 |
+|------|------|----------------|
+| 训练与推理 | PyTorch 2.x + CUDA 12.8 | 全流程计算后端 |
+| 基座模型 | Counterfeit-V2.5 + LoRA（PEFT, rank=16） | 动漫风格图像生成 |
+| 可控生成 | ControlNet（Canny / Scribble / Depth） | 草图/线稿 → AI 精修，保持结构 |
+| 3D 重建 | TripoSR（Stability AI） | 单图 → 带贴图 3D mesh（.glb） |
+| 自动标注 | WD SwinV2 Tagger v3（ONNX Runtime） | 训练数据自动打标 |
+| 推理服务 | FastAPI + Uvicorn | 本地 HTTP API（`/generate` 等接口） |
+| 游戏引擎 | Unity 2022.3 LTS | Editor 插件 + 资产一键导入 |
+| 硬件 | NVIDIA RTX 4060 Laptop（8 GB） | 本地实时推理 |
 
 ---
 
