@@ -13,17 +13,17 @@
 
 ## 📖 这是什么？
 
-一个**从文字/草图到游戏资产**的 AI 管线，分四个阶段：
+一个**从文字/草图到游戏资产**的 AI 管线，分五个阶段：
 
 ```
-┌─────────────┐   ┌──────────────┐   ┌─────────────────┐   ┌─────────────────┐
-│  阶段 1      │──→│  阶段 2       │──→│  阶段 3          │──→│  阶段 4          │
-│  LoRA 微调   │   │  Python API  │   │  Unity 插件      │   │  ControlNet      │
-│             │   │              │   │                 │   │  可控生成         │
-│  48张原神图  │   │  FastAPI     │   │  窗口输入文字     │   │  草图/线稿        │
-│  → 训练 LoRA│   │  /generate   │   │  → AI 生成图片   │   │  → AI 精修上色   │
-│  → 原神风格  │   │  → PNG 图片  │   │  → 导入为资产    │   │  → 保持结构不变   │
-└─────────────┘   └──────────────┘   └─────────────────┘   └─────────────────┘
+┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────┐
+│ 阶段 1    │─→│ 阶段 2    │─→│ 阶段 3    │─→│ 阶段 4    │─→│ 阶段 5    │
+│ LoRA 微调 │  │ Python   │  │ Unity    │  │ ControlNet│  │ TripoSR   │
+│          │  │ API      │  │ 插件      │  │ 可控生成   │  │ 图片→3D   │
+│ 48张原神图│  │ FastAPI  │  │ 输入文字  │  │ 草图/线稿  │  │ 上传图片  │
+│ →训练LoRA│  │ →PNG图片 │  │ →生成图片 │  │ →AI精修   │  │ →3D模型  │
+│ →原神风格│  │          │  │ →导入资产 │  │ →保持结构  │  │ →Unity    │
+└──────────┘  └──────────┘  └──────────┘  └──────────┘  └──────────┘
 ```
 
 ---
@@ -364,16 +364,6 @@ Unity：写入 Assets/ → ModelImporter → 自动创建 Prefab → Ping 到 Pr
 | 基座模型 | Counterfeit-V2.5 | 动漫专用 SD 1.5 微调 |
 | ControlNet | Canny / Scribble / Depth | 草图 → 精修 |
 | 3D 重建 | TripoSR（Stability AI） | 单图 → 带贴图 3D mesh |
-| 打标模型 | WD SwinV2 Tagger v3 (ONNX) | 图像自动标签 |
-| 推理服务 | FastAPI + Uvicorn | HTTP API |
-| 游戏引擎 | Unity 2022.3 LTS | Editor 插件 + 资产导入 |
-| GPU | NVIDIA RTX 4060 Laptop (8GB) | 本地推理 |
-
-| 层级 | 技术 | 用途 |
-|------|------|------|
-| 深度学习框架 | PyTorch 2.x + CUDA | 模型训练与推理 |
-| 模型生态 | HuggingFace Diffusers + PEFT | SD 管线 + LoRA |
-| 基座模型 | Counterfeit-V2.5 | 动漫专用 SD 1.5 微调 |
 | 打标模型 | WD SwinV2 Tagger v3 (ONNX) | 图像自动标签 |
 | 推理服务 | FastAPI + Uvicorn | HTTP API |
 | 游戏引擎 | Unity 2022.3 LTS | Editor 插件 + 资产导入 |
