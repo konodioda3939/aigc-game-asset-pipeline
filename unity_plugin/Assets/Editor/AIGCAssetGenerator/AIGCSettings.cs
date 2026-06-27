@@ -30,6 +30,15 @@ namespace AIGCAssetGenerator
             "fewer digits, cropped, worst quality, low quality, normal quality, " +
             "jpeg artifacts, signature, watermark, username, blurry";
 
+        // ===== 3D 模型生成默认值 =====
+        private const string KEY_MODEL_FORMAT = "AIGC_ModelFormat";
+        private const string KEY_MODEL_RESOLUTION = "AIGC_ModelResolution";
+        private const string KEY_AUTO_PREFAB = "AIGC_AutoCreatePrefab";
+
+        private const string DEFAULT_MODEL_FORMAT = "glb";
+        private const int DEFAULT_MODEL_RESOLUTION = 256;
+        private const bool DEFAULT_AUTO_PREFAB = true;
+
         // ===== 属性（读写 EditorPrefs） =====
         public static string ApiBaseUrl
         {
@@ -55,6 +64,24 @@ namespace AIGCAssetGenerator
             set => EditorPrefs.SetString(KEY_NEGATIVE, value);
         }
 
+        public static string DefaultModelFormat
+        {
+            get => EditorPrefs.GetString(KEY_MODEL_FORMAT, DEFAULT_MODEL_FORMAT);
+            set => EditorPrefs.SetString(KEY_MODEL_FORMAT, value);
+        }
+
+        public static int DefaultModelResolution
+        {
+            get => EditorPrefs.GetInt(KEY_MODEL_RESOLUTION, DEFAULT_MODEL_RESOLUTION);
+            set => EditorPrefs.SetInt(KEY_MODEL_RESOLUTION, Mathf.Clamp(value, 128, 512));
+        }
+
+        public static bool AutoCreatePrefab
+        {
+            get => EditorPrefs.GetBool(KEY_AUTO_PREFAB, DEFAULT_AUTO_PREFAB);
+            set => EditorPrefs.SetBool(KEY_AUTO_PREFAB, value);
+        }
+
         // ===== 重置为默认值 =====
         public static void ResetAll()
         {
@@ -62,6 +89,9 @@ namespace AIGCAssetGenerator
             DefaultSteps = DEFAULT_STEPS;
             DefaultGuidanceScale = DEFAULT_GUIDANCE;
             DefaultNegativePrompt = DEFAULT_NEGATIVE;
+            DefaultModelFormat = DEFAULT_MODEL_FORMAT;
+            DefaultModelResolution = DEFAULT_MODEL_RESOLUTION;
+            AutoCreatePrefab = DEFAULT_AUTO_PREFAB;
         }
     }
 
@@ -135,6 +165,37 @@ namespace AIGCAssetGenerator
             );
             if (negative != AIGCSettings.DefaultNegativePrompt)
                 AIGCSettings.DefaultNegativePrompt = negative;
+
+            EditorGUILayout.Space();
+
+            EditorGUILayout.LabelField("3D 模型生成默认值", EditorStyles.boldLabel);
+
+            string modelFormat = EditorGUILayout.TextField(
+                "默认输出格式 (glb/obj)",
+                AIGCSettings.DefaultModelFormat
+            );
+            if (modelFormat != AIGCSettings.DefaultModelFormat)
+                AIGCSettings.DefaultModelFormat = modelFormat;
+
+            EditorGUILayout.HelpBox(
+                "GLB: Unity 原生支持，贴图内嵌，推荐使用。\nOBJ: 通用格式，需要单独处理贴图。",
+                MessageType.None
+            );
+
+            int modelRes = EditorGUILayout.IntSlider(
+                "默认 Mesh 精度",
+                AIGCSettings.DefaultModelResolution,
+                128, 512
+            );
+            if (modelRes != AIGCSettings.DefaultModelResolution)
+                AIGCSettings.DefaultModelResolution = modelRes;
+
+            bool autoPrefab = EditorGUILayout.Toggle(
+                "自动创建 Prefab",
+                AIGCSettings.AutoCreatePrefab
+            );
+            if (autoPrefab != AIGCSettings.AutoCreatePrefab)
+                AIGCSettings.AutoCreatePrefab = autoPrefab;
 
             EditorGUILayout.Space();
 

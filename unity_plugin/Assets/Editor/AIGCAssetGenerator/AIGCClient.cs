@@ -221,6 +221,88 @@ namespace AIGCAssetGenerator
         }
 
         /// <summary>
+        /// 图片转 3D 模型：上传角色设定图，AI 自动生成带贴图的 3D 模型。
+        /// </summary>
+        /// <param name="referenceImage">输入的角色/物体图片</param>
+        /// <param name="prompt">画面描述（TripoSR 不使用，但保留为未来兼容）</param>
+        /// <param name="outputFormat">输出格式："glb"（推荐）或 "obj"</param>
+        /// <param name="resolution">Mesh 精度：128=快速, 256=标准, 512=高精度</param>
+        /// <param name="seed">随机种子</param>
+        /// <returns>(模型文件字节数据, 模型信息字典)</returns>
+        public static async Task<(byte[] modelData, string filename, string format, int vertices, int faces)>
+            GenerateModel(
+                Texture2D referenceImage,
+                string prompt = "",
+                string outputFormat = "glb",
+                int resolution = 256,
+                int? seed = null)
+        {
+            if (referenceImage == null)
+                throw new ArgumentNullException(nameof(referenceImage));
+
+            // 确保贴图可读
+            Texture2D readableTexture = MakeTextureReadable(referenceImage);
+            try
+            {
+                byte[] pngBytes = readableTexture.EncodeToPNG();
+                if (pngBytes == null || pngBytes.Length == 0)
+                    throw new AIGCException("参考图编码失败。");
+
+                // 构造 multipart/form-data
+                var formData = new System.Collections.Generic.List<UnityEngine.Networking.IMultipartFormSection>
+                {
+                    new MultipartFormFileSection("image", pngBytes, "reference.png", "image/png"),
+                    new MultipartFormDataSection("prompt", string.IsNullOrEmpty(prompt) ? " " : prompt),
+                    new MultipartFormDataSection("output_format", outputFormat),
+                    new MultipartFormDataSection("resolution", resolution.ToString()),
+                };
+
+                if (seed.HasValue)
+                    formData.Add(new MultipartFormDataSection("seed", seed.Value.ToString()));
+
+                string url = $"{AIGCSettings.ApiBaseUrl}/generate-3d";
+
+                using (var request = UnityWebRequest.Post(url, formData))
+                {
+                    request.timeout = 300; // 3D 生成比 2D 慢很多
+
+                    var tcs = new TaskCompletionSource<bool>();
+                    var operation = request.SendWebRequest();
+                    operation.completed += _ => tcs.SetResult(true);
+                    await tcs.Task;
+
+                    if (request.result != UnityWebRequest.Result.Success)
+                    {
+                        string detail = request.downloadHandler?.text ?? request.error;
+                        throw new AIGCException(
+                            $"3D 模型生成失败: {request.error}\n" +
+                            $"详细信息: {detail}\n\n" +
+                            $"请确认推理服务已启动。\n" +
+                            $"首次使用 TripoSR 需要下载模型（约 1.68GB），请检查服务端日志。"
+                        );
+                    }
+
+                    byte[] modelData = request.downloadHandler.data;
+                    if (modelData == null || modelData.Length == 0)
+                        throw new AIGCException("服务返回了空数据。");
+
+                    // 从 response headers 读取元信息
+                    string filename = request.GetResponseHeader("X-Filename") ?? "model.glb";
+                    string format = request.GetResponseHeader("X-Format") ?? outputFormat;
+                    int.TryParse(request.GetResponseHeader("X-Vertices"), out int vertices);
+                    int.TryParse(request.GetResponseHeader("X-Faces"), out int faces);
+
+                    return (modelData, filename, format, vertices, faces);
+                }
+            }
+            finally
+            {
+                if (readableTexture != referenceImage)
+                    UnityEngine.Object.DestroyImmediate(readableTexture);
+            }
+        }
+
+        /// <summary>
         /// 检查推理服务是否在线。
         /// </summary>
         /// <returns>true 表示服务就绪</returns>

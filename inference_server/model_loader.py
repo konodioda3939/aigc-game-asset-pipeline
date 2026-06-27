@@ -21,6 +21,14 @@ from diffusers import (
 )
 from peft import PeftModel
 
+# ==== TripoSR 路径设置（需要 torchmcubes 兼容模块 + TripoSR 源码）====
+_TRIPOSR_DIR = Path(r"D:\aigc-project\TripoSR")
+_COMPAT_DIR = Path(r"D:\aigc-project\inference_server")  # torchmcubes compat
+
+if str(_COMPAT_DIR) not in sys.path:
+    sys.path.insert(0, str(_COMPAT_DIR))  # torchmcubes compat 优先
+if str(_TRIPOSR_DIR) not in sys.path:
+    sys.path.insert(0, str(_TRIPOSR_DIR))  # TripoSR 源码
 
 # ===== 配置 =====
 MODEL_NAME = "gsdf/Counterfeit-V2.5"
@@ -57,6 +65,8 @@ _shared_components = None  # dict(vae, text_encoder, tokenizer, unet, scheduler)
 
 _controlnet_models = {}     # mode → ControlNetModel
 _controlnet_pipelines = {}  # mode → StableDiffusionControlNetPipeline
+
+_triposr_model = None       # TripoSR TSR 模型实例（全局单例）
 
 
 # ===== 设备检测 =====
@@ -405,3 +415,157 @@ def get_loaded_controlnet_modes() -> list:
 def get_available_controlnet_modes() -> list:
     """返回所有支持的 ControlNet 模式列表。"""
     return list(CONTROLNET_MODEL_SOURCES.keys())
+
+
+# ===== TripoSR 3D 生成管线 =====
+
+# TripoSR 模型 HuggingFace ID
+TRIPOSR_MODEL_ID = "stabilityai/TripoSR"
+TRIPOSR_CONFIG = "config.yaml"
+TRIPOSR_WEIGHTS = "model.ckpt"
+
+
+def load_triposr_model():
+    """
+    加载 TripoSR 模型（懒加载，首次调用时下载 ~1.68GB 权重）。
+
+    HF 上的权重文件使用了新版 ViT 键名（encoder.layer.X.attention.attention.query），
+    而我们克隆的 TripoSR 代码期望旧版键名（layers.X.attention.q_proj）。
+    此函数会在加载时自动做键名转换。
+
+    返回：
+        TSR 模型实例（已在 GPU 上，eval 模式）
+    """
+    global _triposr_model
+
+    if _triposr_model is not None:
+        return _triposr_model
+
+    device, dtype = _detect_device()
+
+    # 延迟导入 TripoSR（确保 sys.path 已配置）
+    from tsr.system import TSR
+    from huggingface_hub import hf_hub_download
+    from omegaconf import OmegaConf
+    import re
+
+    # --- 下载模型权重 ---
+    print(f"[model_loader] 正在加载 TripoSR 模型: {TRIPOSR_MODEL_ID} ...", flush=True)
+    print(f"[model_loader] 模型权重 ~1.68GB，首次下载请耐心等待...", flush=True)
+
+    saved_endpoint = os.environ.get("HF_ENDPOINT")
+
+    for strategy_name, use_mirror in [("HuggingFace 镜像", True), ("HuggingFace 直连", False)]:
+        try:
+            if not use_mirror and saved_endpoint:
+                os.environ.pop("HF_ENDPOINT", None)
+                print("[model_loader] 切换为直连 huggingface.co ...", flush=True)
+            elif use_mirror and saved_endpoint:
+                os.environ["HF_ENDPOINT"] = saved_endpoint
+
+            # 手动下载配置文件
+            config_path = hf_hub_download(
+                repo_id=TRIPOSR_MODEL_ID,
+                filename=TRIPOSR_CONFIG,
+            )
+            # 手动下载权重文件
+            weight_path = hf_hub_download(
+                repo_id=TRIPOSR_MODEL_ID,
+                filename=TRIPOSR_WEIGHTS,
+            )
+            print(f"[model_loader] TripoSR 文件下载完成（{strategy_name}）。", flush=True)
+            break
+        except Exception as e:
+            print(f"[model_loader] {strategy_name} 下载失败: {e}", flush=True)
+            if strategy_name == "HuggingFace 直连":
+                if saved_endpoint:
+                    os.environ["HF_ENDPOINT"] = saved_endpoint
+                raise RuntimeError(
+                    f"TripoSR 模型下载失败（所有策略均失败）。\n"
+                    f"模型地址: https://huggingface.co/{TRIPOSR_MODEL_ID}\n"
+                    f"请检查网络后重启服务。"
+                )
+
+    # 恢复环境变量
+    if saved_endpoint:
+        os.environ["HF_ENDPOINT"] = saved_endpoint
+
+    # --- 加载 checkpoint 并做键名转换 ---
+    print("[model_loader] 正在转换模型权重键名...", flush=True)
+    ckpt = torch.load(weight_path, map_location="cpu")
+    ckpt = _remap_triposr_keys(ckpt)
+    print("[model_loader] 键名转换完成。", flush=True)
+
+    # --- 用配置创建模型，然后加载转换后的权重 ---
+    cfg = OmegaConf.load(config_path)
+    OmegaConf.resolve(cfg)
+    model = TSR(cfg)
+    model.load_state_dict(ckpt)
+
+    # --- 移到 GPU ---
+    model.to(device)
+    model.eval()
+
+    # --- 设置 marching cubes 分辨率 ---
+    model.set_marching_cubes_resolution(256)
+
+    _triposr_model = model
+    print(f"[model_loader] TripoSR 模型就绪（设备: {device}）。", flush=True)
+    return model
+
+
+def _remap_triposr_keys(state_dict: dict) -> dict:
+    """
+    将 HF 新版 ViT 键名转换为 TripoSR 代码期望的旧版键名。
+
+    新版 (HF checkpoint):  image_tokenizer.model.encoder.layer.X.attention.attention.query.weight
+    旧版 (TripoSR 代码):    image_tokenizer.model.layers.X.attention.q_proj.weight
+
+    映射规则：
+      encoder.layer.{N}  →  layers.{N}
+      attention.attention.query  →  attention.q_proj
+      attention.attention.key    →  attention.k_proj
+      attention.attention.value  →  attention.v_proj
+      attention.output.dense     →  attention.o_proj
+      intermediate.dense         →  mlp.fc1
+      output.dense               →  mlp.fc2  (仅 MLP 路径)
+    """
+    import re
+
+    new_dict = {}
+    renamed_count = 0
+
+    for key, value in state_dict.items():
+        new_key = key
+
+        # 只处理 image_tokenizer 相关的键
+        if key.startswith("image_tokenizer.model."):
+            # encoder.layer.X → layers.X
+            new_key = re.sub(r'encoder\.layer\.(\d+)', r'layers.\1', new_key)
+
+            # attention.attention.query/key/value → attention.q_proj/k_proj/v_proj
+            new_key = new_key.replace('attention.attention.query', 'attention.q_proj')
+            new_key = new_key.replace('attention.attention.key', 'attention.k_proj')
+            new_key = new_key.replace('attention.attention.value', 'attention.v_proj')
+
+            # attention.output.dense → attention.o_proj
+            new_key = new_key.replace('attention.output.dense', 'attention.o_proj')
+
+            # intermediate.dense → mlp.fc1
+            new_key = new_key.replace('intermediate.dense', 'mlp.fc1')
+
+            # output.dense → mlp.fc2 (注意：attention.output.dense 已经在上一步被替换)
+            new_key = new_key.replace('output.dense', 'mlp.fc2')
+
+            if new_key != key:
+                renamed_count += 1
+
+        new_dict[new_key] = value
+
+    print(f"[model_loader] 重映射了 {renamed_count} 个权重键。", flush=True)
+    return new_dict
+
+
+def get_triposr_model():
+    """获取 TripoSR 模型实例（首次调用自动下载+加载）。"""
+    return load_triposr_model()

@@ -39,6 +39,7 @@ from model_loader import (
     get_pipeline,
     get_controlnet_pipeline,
     get_available_controlnet_modes,
+    get_triposr_model,
 )
 
 
@@ -78,6 +79,7 @@ class HealthResponse(BaseModel):
     device: str
     lora_loaded: bool
     controlnet_modes: list
+    triposr_loaded: bool
     uptime_seconds: float
 
 
@@ -194,7 +196,7 @@ async def startup():
     print(f"\n  服务已就绪 → http://127.0.0.1:8000", flush=True)
     print(f"  API 文档 → http://127.0.0.1:8000/docs", flush=True)
     print(f"  ControlNet 可用: {available}", flush=True)
-    print(f"  首次使用 ControlNet 时会自动下载模型（约 1.4GB），请耐心等待。", flush=True)
+    print(f"  TripoSR 3D 生成: 首次使用自动下载（~1.68GB）", flush=True)
     print("=" * 50, flush=True)
 
 
@@ -373,6 +375,159 @@ async def generate_controlled(
     )
 
 
+# ===== 3D 模型生成接口 =====
+
+@app.post("/generate-3d")
+async def generate_3d(
+    image: UploadFile = File(..., description="角色/物体参考图（PNG 或 JPG）"),
+    prompt: str = Form("", description="预留参数，TripoSR 不使用 prompt"),
+    output_format: str = Form("glb", description="输出格式: glb 或 obj"),
+    resolution: int = Form(256, ge=128, le=512, description="Mesh 精度（128=快, 256=标准, 512=高精度）"),
+    seed: int | None = Form(None, description="TripoSR 是确定性模型，seed 作用有限"),
+):
+    """
+    图片转 3D 模型：上传角色设定图，AI 自动生成带贴图的 3D 模型。
+
+    - **image**: 必须，输入的角色/物体图片
+    - **output_format**: glb（推荐，贴图内嵌，Unity 原生支持）或 obj
+    - **resolution**: 128=快速预览, 256=标准质量, 512=最高精度（更慢）
+    """
+    from tsr.utils import remove_background, resize_foreground
+
+    # ---- 1. 读取参考图 ----
+    try:
+        ref_bytes = await image.read()
+        ref_image = Image.open(io.BytesIO(ref_bytes)).convert("RGB")
+    except Exception:
+        raise HTTPException(status_code=400, detail="无法读取参考图，请确认为有效 PNG/JPG 文件。")
+
+    original_size = ref_image.size
+    print(f"\n[generate-3d] image_size={original_size}, format={output_format}, "
+          f"resolution={resolution}", flush=True)
+
+    # ---- 2. 预处理：去背景 + 调整 ----
+    try:
+        print("[generate-3d] 正在去除背景...", flush=True)
+        ref_image = remove_background(ref_image)
+        print(f"[generate-3d] 去背景完成, mode={ref_image.mode}, size={ref_image.size}", flush=True)
+
+        # 保存去背景后的中间结果（方便排查是抠图问题还是模型问题）
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        safe_name = "model"
+        rembg_path = OUTPUT_DIR / f"{timestamp}_3d_rembg.png"
+        ref_image.save(rembg_path)
+        print(f"[generate-3d] 已保存去背景结果: {rembg_path}", flush=True)
+
+        ref_image = resize_foreground(ref_image, 0.85)  # 需要 RGBA 做裁剪
+        ref_image = ref_image.convert("RGB")  # 裁剪完后转 RGB，TripoSR 需要
+        print(f"[generate-3d] 预处理完成, size={ref_image.size}", flush=True)
+
+        # 保存最终预处理图（喂给 TripoSR 的样子）
+        preproc_path = OUTPUT_DIR / f"{timestamp}_3d_preproc.png"
+        ref_image.save(preproc_path)
+        print(f"[generate-3d] 已保存预处理结果: {preproc_path}", flush=True)
+    except Exception as e:
+        print(f"[generate-3d] 预处理失败: {traceback.format_exc()}", flush=True)
+        raise HTTPException(status_code=500, detail=f"图片预处理失败: {str(e)}")
+
+    # ---- 3. 获取 TripoSR 模型 ----
+    try:
+        model = get_triposr_model()
+    except Exception as e:
+        print(f"[generate-3d] TripoSR 加载失败: {e}", flush=True)
+        raise HTTPException(status_code=500, detail=f"TripoSR 模型加载失败: {str(e)}")
+
+    # ---- 4. 设置精度 + 分块大小（节省显存） ----
+    model.set_marching_cubes_resolution(resolution)
+    # 渲染器分块：每次只处理 4096 个点，避免一次性撑爆显存
+    # 默认 chunk_size=0（不分块），256³ 需要 16M 点同时处理 → OOM
+    model.renderer.set_chunk_size(4096)
+    print(f"[generate-3d] 渲染器分块大小: 4096", flush=True)
+
+    # ---- 5. 推理 ----
+    device = str(model.device) if hasattr(model, 'device') else "cuda"
+    actual_seed = seed if seed is not None else int(time.time() * 1000) % (2**31)
+    print(f"[generate-3d] 正在生成 3D 模型（这可能需要 5-30 秒）...", flush=True)
+
+    try:
+        if seed is not None:
+            torch.manual_seed(actual_seed)
+
+        with torch.no_grad():
+            scene_codes = model(ref_image, device=device)
+    except torch.cuda.OutOfMemoryError:
+        fallback_res = max(128, resolution // 2)
+        print(f"[generate-3d] 显存不足，降级到 resolution={fallback_res} 重试...", flush=True)
+        torch.cuda.empty_cache()
+        model.set_marching_cubes_resolution(fallback_res)
+        with torch.no_grad():
+            scene_codes = model(ref_image, device=device)
+        resolution = fallback_res
+    except Exception as e:
+        print(f"[generate-3d] 推理失败: {traceback.format_exc()}", flush=True)
+        raise HTTPException(status_code=500, detail=f"3D 模型生成失败: {str(e)}")
+
+    # ---- 6. 提取 mesh ----
+    try:
+        print("[generate-3d] 正在提取 3D mesh...", flush=True)
+        mesh = model.extract_mesh(scene_codes, has_vertex_color=True, resolution=resolution)[0]
+        print(f"[generate-3d] mesh: {len(mesh.vertices)} 顶点, {len(mesh.faces)} 面", flush=True)
+    except torch.cuda.OutOfMemoryError:
+        fallback_res = max(128, resolution // 2)
+        print(f"[generate-3d] 提取 mesh 时显存不足，降级到 resolution={fallback_res}...", flush=True)
+        torch.cuda.empty_cache()
+        model.set_marching_cubes_resolution(fallback_res)
+        mesh = model.extract_mesh(scene_codes, has_vertex_color=True, resolution=fallback_res)[0]
+        print(f"[generate-3d] mesh: {len(mesh.vertices)} 顶点, {len(mesh.faces)} 面", flush=True)
+    except Exception as e:
+        print(f"[generate-3d] Mesh 提取失败: {traceback.format_exc()}", flush=True)
+        raise HTTPException(status_code=500, detail=f"Mesh 提取失败: {str(e)}")
+
+    # ---- 8. 导出 ----
+    try:
+        model_bytes = io.BytesIO()
+        if output_format == "obj":
+            mesh.export(model_bytes, file_type="obj")
+            media_type = "model/obj"
+            ext = "obj"
+        else:
+            mesh.export(model_bytes, file_type="glb")
+            media_type = "model/gltf-binary"
+            ext = "glb"
+        model_bytes.seek(0)
+        model_data = model_bytes.getvalue()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"3D 模型导出失败: {str(e)}")
+
+    # ---- 8. 存档 ----
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+    safe_name = "model"  # TripoSR 不使用 prompt，用固定名
+    filename = f"{timestamp}_3d_{safe_name}.{ext}"
+    archive_path = OUTPUT_DIR / filename
+    archive_path.write_bytes(model_data)
+    print(f"[generate-3d] 已保存: {archive_path} "
+          f"({len(model_data)/1024:.0f} KB, "
+          f"{len(mesh.vertices)} verts, {len(mesh.faces)} faces)", flush=True)
+
+    # ---- 9. 清理显存 ----
+    del scene_codes
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+    # ---- 10. 返回 ----
+    return Response(
+        content=model_data,
+        media_type=media_type,
+        headers={
+            "X-Seed": str(actual_seed),
+            "X-Filename": filename,
+            "X-Format": output_format,
+            "X-Vertices": str(len(mesh.vertices)),
+            "X-Faces": str(len(mesh.faces)),
+        },
+    )
+
+
 # ===== 健康检查 =====
 
 @app.get("/health")
@@ -380,18 +535,25 @@ async def health():
     """
     健康检查：返回服务状态、模型信息、ControlNet 可用模式。
     """
-    from model_loader import get_pipeline, get_loaded_controlnet_modes, get_available_controlnet_modes
+    from model_loader import (
+        get_pipeline, get_loaded_controlnet_modes, get_available_controlnet_modes,
+    )
 
     pipe = get_pipeline()
     lora_loaded = Path(r"D:\aigc-project\lora_output\adapter_model.safetensors").exists()
     uptime = (time.time() - _start_time) if _start_time else 0
 
+    # 检查 TripoSR 状态（不触发加载）
+    from model_loader import _triposr_model
+    triposr_loaded = _triposr_model is not None
+
     return HealthResponse(
         status="ready" if pipe is not None else "loading",
-        model="Counterfeit-V2.5 + LoRA (原神风格) + ControlNet",
+        model="Counterfeit-V2.5 + LoRA (原神风格) + ControlNet + TripoSR",
         device="cuda" if (pipe and str(pipe.device).startswith("cuda")) else "cpu",
         lora_loaded=lora_loaded,
         controlnet_modes=get_loaded_controlnet_modes() or get_available_controlnet_modes(),
+        triposr_loaded=triposr_loaded,
         uptime_seconds=round(uptime, 1),
     )
 
@@ -406,13 +568,20 @@ async def root():
 @app.on_event("shutdown")
 async def shutdown():
     """服务关闭时释放 GPU 显存。"""
-    from model_loader import get_pipeline
+    from model_loader import get_pipeline, _triposr_model
 
     pipe = get_pipeline()
     if pipe is not None:
         del pipe
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
+
+    # 清理 TripoSR 模型
+    if _triposr_model is not None:
+        del _triposr_model
+        import model_loader
+        model_loader._triposr_model = None
+
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
     print("[shutdown] 服务已关闭，显存已释放。", flush=True)
 
 

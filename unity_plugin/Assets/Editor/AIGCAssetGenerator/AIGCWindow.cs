@@ -26,14 +26,23 @@ namespace AIGCAssetGenerator
         private static readonly string[] AssetTypeNames = { "图标", "贴图", "UI元素" };
 
         // 生成模式
-        private int _generationMode = 0; // 0=文生图, 1=草图精修
-        private static readonly string[] GenerationModeNames = { "文生图", "草图精修" };
+        private int _generationMode = 0; // 0=文生图, 1=草图精修, 2=3D模型生成
+        private static readonly string[] GenerationModeNames = { "文生图", "草图精修", "3D模型生成" };
 
         // ControlNet 参数
         private int _controlModeIndex = 0; // 0=Canny, 1=Scribble
         private static readonly string[] ControlModeNames = { "Canny 线稿精修", "Scribble 草图生成", "Depth 深度保持" };
         private Texture2D _referenceTexture = null;
         private float _controlStrength = 0.8f;
+
+        // 3D 模型生成参数
+        private int _modelFormatIndex = 0; // 0=OBJ, 1=GLB
+        private static readonly string[] ModelFormatNames = { "OBJ（推荐，Unity 原生支持）", "GLB" };
+        private int _modelResolution = 256; // Mesh 精度
+        private byte[] _generatedModelBytes = null;
+        private string _generatedModelFormat = "glb";
+        private int _generatedModelVertices = 0;
+        private int _generatedModelFaces = 0;
 
         // 高级选项
         private bool _showAdvanced = false;
@@ -110,13 +119,30 @@ namespace AIGCAssetGenerator
                 DrawControlModeSelector();
                 EditorGUILayout.Space(5);
             }
+            else if (_generationMode == 2)
+            {
+                // 3D 模型生成模式
+                DrawReferenceImageField();
+                EditorGUILayout.Space(5);
+                DrawModelFormatSelector();
+                EditorGUILayout.Space(5);
+            }
 
-            DrawPromptField();
-            EditorGUILayout.Space(5);
-            DrawAssetTypeSelector();
-            EditorGUILayout.Space(5);
-            DrawAdvancedOptions();
-            EditorGUILayout.Space(10);
+            // 3D 模式：不需要 prompt + 资产类型
+            if (_generationMode != 2)
+            {
+                DrawPromptField();
+                EditorGUILayout.Space(5);
+                DrawAssetTypeSelector();
+                EditorGUILayout.Space(5);
+                DrawAdvancedOptions();
+                EditorGUILayout.Space(10);
+            }
+            else
+            {
+                Draw3DAdvancedOptions();
+                EditorGUILayout.Space(10);
+            }
             DrawGenerateButton();
             EditorGUILayout.Space(5);
             DrawStatusBar();
@@ -228,8 +254,10 @@ namespace AIGCAssetGenerator
 
             if (_generationMode == 0)
                 EditorGUILayout.LabelField("纯文字描述 → AI 随机生成图片", EditorStyles.miniLabel);
-            else
+            else if (_generationMode == 1)
                 EditorGUILayout.LabelField("上传参考图（草图/线稿）→ AI 保持结构 + 按描述填充内容", EditorStyles.miniLabel);
+            else
+                EditorGUILayout.LabelField("上传角色设定图 → AI 自动生成带贴图的 3D 模型（.glb/.obj）", EditorStyles.miniLabel);
         }
 
         private void DrawReferenceImageField()
@@ -286,6 +314,46 @@ namespace AIGCAssetGenerator
             );
         }
 
+        private void DrawModelFormatSelector()
+        {
+            EditorGUILayout.LabelField("输出格式", EditorStyles.boldLabel);
+            _modelFormatIndex = GUILayout.Toolbar(_modelFormatIndex, ModelFormatNames, GUILayout.Height(25));
+
+            string hint = _modelFormatIndex switch
+            {
+                0 => "GLB: Unity 原生支持，贴图内嵌，推荐使用",
+                1 => "OBJ: 通用格式，但贴图需单独处理",
+                _ => ""
+            };
+            EditorGUILayout.LabelField(hint, EditorStyles.miniLabel);
+        }
+
+        private void Draw3DAdvancedOptions()
+        {
+            _showAdvanced = EditorGUILayout.Foldout(_showAdvanced, "高级选项");
+            if (!_showAdvanced) return;
+
+            EditorGUI.indentLevel++;
+
+            _modelResolution = EditorGUILayout.IntSlider("Mesh 精度", _modelResolution, 128, 512);
+            string resolutionHint = _modelResolution switch
+            {
+                128 => "  快速预览 — 精度较低，速度快（~5秒）",
+                256 => "  标准质量 — 推荐值（~10秒）",
+                512 => "  最高精度 — 顶点更密，但更慢且更吃显存（~30秒）",
+                _ => ""
+            };
+            EditorGUILayout.LabelField(resolutionHint, EditorStyles.miniLabel);
+
+            _useFixedSeed = EditorGUILayout.Toggle("固定随机种子", _useFixedSeed);
+            if (_useFixedSeed)
+            {
+                _fixedSeedValue = EditorGUILayout.IntField("种子值", _fixedSeedValue);
+            }
+
+            EditorGUI.indentLevel--;
+        }
+
         private void DrawAdvancedOptions()
         {
             _showAdvanced = EditorGUILayout.Foldout(_showAdvanced, "高级选项");
@@ -327,10 +395,18 @@ namespace AIGCAssetGenerator
 
         private void DrawGenerateButton()
         {
-            GUI.enabled = !_isGenerating && !string.IsNullOrWhiteSpace(_prompt);
+            // 3D 模式不需要 prompt，但需要参考图
+            bool canGenerate = !_isGenerating && (
+                _generationMode == 2
+                    ? _referenceTexture != null
+                    : !string.IsNullOrWhiteSpace(_prompt)
+            );
+            GUI.enabled = canGenerate;
 
-            if (GUILayout.Button(_isGenerating ? "生成中..." : "生成 (Generate)",
-                    GUILayout.Height(40)))
+            string buttonText = _isGenerating ? "生成中..." :
+                _generationMode == 2 ? "生成 3D 模型 (Generate 3D)" : "生成 (Generate)";
+
+            if (GUILayout.Button(buttonText, GUILayout.Height(40)))
             {
                 _ = DoGenerate();
             }
@@ -357,6 +433,21 @@ namespace AIGCAssetGenerator
         private void DrawPreviewArea()
         {
             EditorGUILayout.LabelField("生成结果预览", EditorStyles.boldLabel);
+
+            // 3D 模式：显示模型信息
+            if (_generationMode == 2 && _generatedModelBytes != null)
+            {
+                EditorGUILayout.HelpBox(
+                    $"3D 模型已生成！\n" +
+                    $"格式: {_generatedModelFormat.ToUpper()}\n" +
+                    $"顶点数: {_generatedModelVertices:N0}\n" +
+                    $"面数: {_generatedModelFaces:N0}\n" +
+                    $"文件大小: {_generatedModelBytes.Length / 1024} KB\n\n" +
+                    $"点击「导入到项目」将模型导入为 Prefab。",
+                    MessageType.Info
+                );
+                return;
+            }
 
             if (_generatedTexture != null)
             {
@@ -389,11 +480,18 @@ namespace AIGCAssetGenerator
 
         private void DrawImportButton()
         {
-            GUI.enabled = (_generatedTexture != null && !_isGenerating);
+            bool hasResult = _generationMode == 2
+                ? _generatedModelBytes != null
+                : _generatedTexture != null;
+            GUI.enabled = (hasResult && !_isGenerating);
 
             GUILayout.BeginHorizontal();
 
-            if (GUILayout.Button("导入到项目 (Import to Project)", GUILayout.Height(35)))
+            string importLabel = _generationMode == 2
+                ? "导入 3D 模型到项目"
+                : "导入到项目 (Import to Project)";
+
+            if (GUILayout.Button(importLabel, GUILayout.Height(35)))
             {
                 DoImport();
             }
@@ -415,16 +513,20 @@ namespace AIGCAssetGenerator
         /// </summary>
         private async Task DoGenerate()
         {
-            if (string.IsNullOrWhiteSpace(_prompt))
+            // 文生图/草图精修模式需要 prompt；3D 模式不需要
+            if (_generationMode != 2 && string.IsNullOrWhiteSpace(_prompt))
             {
                 SetStatus("请输入画面描述 (Prompt)。", MessageType.Warning);
                 return;
             }
 
-            // 草图精修模式：必须有参考图
-            if (_generationMode == 1 && _referenceTexture == null)
+            // 草图精修/3D 模式：必须有参考图
+            if ((_generationMode == 1 || _generationMode == 2) && _referenceTexture == null)
             {
-                SetStatus("草图精修模式下需要上传参考图！请拖入一张草图或线稿。", MessageType.Warning);
+                string msg = _generationMode == 2
+                    ? "3D 模型生成需要上传参考图！请拖入一张角色或物体图片。"
+                    : "草图精修模式下需要上传参考图！请拖入一张草图或线稿。";
+                SetStatus(msg, MessageType.Warning);
                 return;
             }
 
@@ -440,11 +542,16 @@ namespace AIGCAssetGenerator
             // 开始生成
             _isGenerating = true;
             _generatedTexture = null;
+            _generatedModelBytes = null;
             _lastGeneratedSeed = "";
 
-            string waitMsg = _generationMode == 0
-                ? "正在生成图片，请耐心等待（通常 5~20 秒）..."
-                : "ControlNet 生成中，首次需下载模型（约 1.4GB），请耐心等待...";
+            string waitMsg = _generationMode switch
+            {
+                0 => "正在生成图片，请耐心等待（通常 5~20 秒）...",
+                1 => "ControlNet 生成中，首次需下载模型（约 1.4GB），请耐心等待...",
+                2 => "TripoSR 3D 模型生成中，首次需下载模型（约 1.68GB），请耐心等待...",
+                _ => "生成中..."
+            };
             SetStatus(waitMsg, MessageType.Info);
 
             try
@@ -462,8 +569,13 @@ namespace AIGCAssetGenerator
                         steps: _steps,
                         guidanceScale: _guidanceScale
                     );
+                    _lastGeneratedSeed = seed?.ToString() ?? "随机";
+                    SetStatus(
+                        $"生成成功！图片尺寸: {_generatedTexture.width}×{_generatedTexture.height}",
+                        MessageType.Info
+                    );
                 }
-                else
+                else if (_generationMode == 1)
                 {
                     // ControlNet 可控生成
                     string controlMode = _controlModeIndex switch { 0 => "canny", 1 => "scribble", 2 => "depth", _ => "canny" };
@@ -478,13 +590,40 @@ namespace AIGCAssetGenerator
                         guidanceScale: _guidanceScale,
                         controlStrength: _controlStrength
                     );
+                    _lastGeneratedSeed = seed?.ToString() ?? "随机";
+                    SetStatus(
+                        $"生成成功！图片尺寸: {_generatedTexture.width}×{_generatedTexture.height}",
+                        MessageType.Info
+                    );
                 }
+                else
+                {
+                    // 3D 模型生成
+                    string format = _modelFormatIndex == 0 ? "obj" : "glb";
 
-                _lastGeneratedSeed = seed?.ToString() ?? "随机";
-                SetStatus(
-                    $"生成成功！图片尺寸: {_generatedTexture.width}×{_generatedTexture.height}",
-                    MessageType.Info
-                );
+                    var (modelData, filename, outFormat, vertices, faces) =
+                        await AIGCClient.GenerateModel(
+                            referenceImage: _referenceTexture,
+                            prompt: _prompt?.Trim() ?? "",
+                            outputFormat: format,
+                            resolution: _modelResolution,
+                            seed: seed
+                        );
+
+                    _generatedModelBytes = modelData;
+                    _generatedModelFormat = outFormat;
+                    _generatedModelVertices = vertices;
+                    _generatedModelFaces = faces;
+                    _lastGeneratedSeed = seed?.ToString() ?? "随机";
+
+                    SetStatus(
+                        $"3D 模型生成成功！\n" +
+                        $"格式: {outFormat.ToUpper()}, " +
+                        $"顶点: {vertices:N0}, 面: {faces:N0}, " +
+                        $"大小: {modelData.Length / 1024} KB",
+                        MessageType.Info
+                    );
+                }
             }
             catch (AIGCException ex)
             {
@@ -508,6 +647,43 @@ namespace AIGCAssetGenerator
         /// </summary>
         private void DoImport()
         {
+            if (_generationMode == 2)
+            {
+                // 3D 模型导入
+                if (_generatedModelBytes == null)
+                {
+                    SetStatus("没有可导入的 3D 模型，请先生成。", MessageType.Warning);
+                    return;
+                }
+
+                try
+                {
+                    string baseName = GenerateAssetName(
+                        string.IsNullOrWhiteSpace(_prompt) ? "3d_model" : _prompt
+                    );
+                    string format = _modelFormatIndex == 0 ? "obj" : "glb";
+
+                    string prefabPath = AssetImporter.SaveAsModel(_generatedModelBytes, baseName, format);
+
+                    SetStatus(
+                        $"3D 模型导入成功！\n" +
+                        $"Prefab 路径: {prefabPath}\n" +
+                        $"可直接拖入 Scene 使用。",
+                        MessageType.Info
+                    );
+
+                    Debug.Log($"[AIGC] 3D 模型导入完成: {prefabPath}");
+                }
+                catch (Exception ex)
+                {
+                    SetStatus($"3D 模型导入失败: {ex.Message}", MessageType.Error);
+                    Debug.LogError($"[AIGC] 3D 导入失败: {ex}");
+                }
+
+                return;
+            }
+
+            // 2D 图片导入
             if (_generatedTexture == null)
             {
                 SetStatus("没有可导入的图片，请先生成。", MessageType.Warning);

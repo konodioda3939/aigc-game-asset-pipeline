@@ -259,7 +259,7 @@ adapter_model.safetensors (12.2 MB)
 
 ---
 
-### 阶段 4：ControlNet 可控生成 🆕
+### 阶段 4：ControlNet 可控生成
 
 **目标**：在文本生图基础上，增加「草图/线稿 → AI 精修」的可控生成能力。
 
@@ -296,7 +296,78 @@ ControlNet + 融合了 LoRA 的 UNet → 生成精修图
 
 ---
 
+### 阶段 5：图片转 3D 模型 
+
+**目标**：上传一张物体/角色图片，AI 自动生成带贴图的 3D 模型（.glb），可直接导入 Unity 作为 Prefab。
+
+**技术选型**：TripoSR（Stability AI 开源）—— 单阶段前馈模型，~725MB fp16 权重，8GB 显存可跑。
+
+**流程**：
+
+```text
+用户上传参考图 (Unity 拖入或 API 上传)
+       ↓
+rembg 去背景（自动抠图）
+       ↓
+resize_foreground（裁剪至主体区域）
+       ↓
+TripoSR 推理 → 提取 3D mesh（Marching Cubes 分块处理）
+       ↓
+导出 .glb（贴图内嵌）→ 存档
+       ↓
+Unity：写入 Assets/ → ModelImporter → 自动创建 Prefab → Ping 到 Project 窗口
+```
+
+**API 接口**：
+
+| 参数 | 默认值 | 说明 |
+|------|--------|------|
+| `image` | 必填 | 物体/角色参考图 |
+| `output_format` | `"glb"` | `glb`（Unity 原生支持）或 `obj` |
+| `resolution` | 256 | Mesh 精度：128=快速预览, 256=标准, 512=高精度 |
+
+**测试数据**（RTX 4060 Laptop, resolution=256）：
+
+| 输入图 | 结果 |
+|--------|------|
+| 橘子照片 | ✅ 球形 + 大致颜色正确（有白斑和方块感） |
+| 白色咖啡杯（白底） | ❌ rembg 抠图失败（白物+白底分不清） |
+| 二次元角色 | ❌ 一坨（TripoSR 没见过风格化角色） |
+
+**设计亮点**：
+
+- 三级下载策略（ModelScope → HF 镜像 → HF 直连），国内网络友好
+- HF 权重键名自动转换（适配新版 ViT 架构）
+- torchmcubes 用 CPU 兼容层替代（skimage），无需 Visual Studio 编译
+- 渲染器分块处理（chunk_size=4096），8GB 显存安全
+- rembg 去背景 + resize_foreground 裁剪，全自动预处理
+- 中间结果自动存档（去背景图 + 预处理图 + 最终模型），方便排查问题
+
+**当前局限**：
+
+| 局限 | 原因 | 改善方向 |
+|------|------|----------|
+| 简单物体效果好，复杂角色崩 | TripoSR 训练数据为真实 3D 扫描（Objaverse） | 换用角色专用模型 |
+| 背面/遮挡区域颜色不准 | 单视角输入，背面靠模型猜 | 多视角输入（TRELLIS） |
+| 曲面有方块感 | Marching Cubes 网格分辨率限制 | 提高 resolution 或换 FlexiCubes |
+
+> **核心价值**：整条「图片 → 3D → Unity Prefab」管线已打通。后续只需升级底模就可以改善质量，不用改架构。
+
+---
+
 ## 🛠️ 技术栈
+
+| 层级 | 技术 | 用途 |
+|------|------|------|
+| 深度学习框架 | PyTorch 2.x + CUDA | 模型训练与推理 |
+| 模型生态 | HuggingFace Diffusers + PEFT | SD 管线 + LoRA |
+| 基座模型 | Counterfeit-V2.5 | 动漫专用 SD 1.5 微调 |
+| ControlNet | Canny / Scribble / Depth | 草图 → 精修 |
+| 3D 重建 | TripoSR（Stability AI） | 单图 → 带贴图 3D mesh |
+| 打标模型 | WD SwinV2 Tagger v3 (ONNX) | 图像自动标签 |
+| 推理服务 | FastAPI + Uvicorn | HTTP API |
+| 游戏引擎 | Unity 2022.3 LTS | Editor 插件 + 资产导入 |
+| GPU | NVIDIA RTX 4060 Laptop (8GB) | 本地推理 |
 
 | 层级 | 技术 | 用途 |
 |------|------|------|
@@ -312,9 +383,10 @@ ControlNet + 融合了 LoRA 的 UNet → 生成精修图
 
 ## 🎯 下一步
 
-- [ ] 训练自己的 ControlNet（用游戏素材风格，更贴合项目需求）
-- [ ] 图片转 3D 模型（3D 内容生成）
+- [x] ~~图片转 3D 模型~~ ✅ 管线已打通（TripoSR），需升级底模改善质量
+- [ ] 升级 3D 底模（TRELLIS / Unique3D，改善角色和背面质量）
 - [ ] PBR 材质批量生成（游戏生产中实际表现）
+- [ ] 训练自己的 ControlNet（用游戏素材风格）
 - [ ] 批量生成 + 多种子变体（一次生成多张，挑最好的）
 - [ ] 训练更多风格 LoRA（科幻、像素、卡通）
 - [ ] 图片后期处理（背景去除、亮度调整）

@@ -71,15 +71,143 @@ namespace AIGCAssetGenerator
         }
 
         /// <summary>
+        /// 将 3D 模型字节数据保存为 Unity 项目资产（.glb / .obj），并创建 Prefab。
+        /// </summary>
+        /// <param name="modelData">模型文件的原始字节数据</param>
+        /// <param name="assetName">资产名称（不含扩展名）</param>
+        /// <param name="format">格式："glb" 或 "obj"</param>
+        /// <returns>生成的 Prefab 路径</returns>
+        public static string SaveAsModel(byte[] modelData, string assetName, string format = "glb")
+        {
+            if (modelData == null || modelData.Length == 0)
+                throw new ArgumentNullException(nameof(modelData));
+
+            if (string.IsNullOrWhiteSpace(assetName))
+                assetName = "generated_model";
+
+            // 1. 清理资产名
+            assetName = SanitizeFileName(assetName);
+
+            // 2. 确保输出目录存在
+            string fullOutputDir = Path.Combine(Application.dataPath, "GeneratedAssets");
+            if (!Directory.Exists(fullOutputDir))
+                Directory.CreateDirectory(fullOutputDir);
+
+            // 3. 获取唯一路径
+            string ext = format == "obj" ? ".obj" : ".glb";
+            string assetPath = GetUniqueAssetPath(assetName, ext);
+
+            // 4. 写入磁盘
+            string fullPath = Path.Combine(Application.dataPath, "GeneratedAssets",
+                Path.GetFileName(assetPath));
+            File.WriteAllBytes(fullPath, modelData);
+
+            Debug.Log($"[AIGC] 模型文件已写入: {fullPath} ({modelData.Length / 1024} KB)");
+
+            // 5. 刷新 Unity 资源数据库
+            AssetDatabase.Refresh();
+
+            // 6. 配置 ModelImporter
+            ConfigureModelImporter(assetPath);
+
+            // 7. 创建 Prefab
+            string prefabPath = CreatePrefabFromModel(assetPath);
+
+            Debug.Log($"[AIGC] 3D 模型已导入: {assetPath}, Prefab: {prefabPath}");
+
+            // 8. 在 Project 窗口中高亮 Prefab
+            EditorGUIUtility.PingObject(AssetDatabase.LoadAssetAtPath<GameObject>(prefabPath));
+
+            return prefabPath;
+        }
+
+        /// <summary>
+        /// 配置 ModelImporter 参数（材质导入模式、缩放等）。
+        /// </summary>
+        private static void ConfigureModelImporter(string assetPath)
+        {
+            ModelImporter importer = UnityEditor.AssetImporter.GetAtPath(assetPath) as ModelImporter;
+            if (importer == null) return;
+
+            bool changed = false;
+
+            // 导入材质（TripoSR 生成的 glb 内嵌顶点色/贴图）
+            if (importer.materialImportMode != ModelImporterMaterialImportMode.ImportStandard)
+            {
+                importer.materialImportMode = ModelImporterMaterialImportMode.ImportStandard;
+                changed = true;
+            }
+
+            // 保持原始缩放
+            if (Math.Abs(importer.globalScale - 1.0f) > 0.001f)
+            {
+                importer.globalScale = 1.0f;
+                changed = true;
+            }
+
+            // 网格压缩（可选，减小文件大小）
+            if (importer.meshCompression != ModelImporterMeshCompression.Off)
+            {
+                importer.meshCompression = ModelImporterMeshCompression.Off;
+                changed = true;
+            }
+
+            if (changed)
+            {
+                importer.SaveAndReimport();
+                Debug.Log("[AIGC] ModelImporter 已配置: materialImport=Standard, scale=1.0");
+            }
+        }
+
+        /// <summary>
+        /// 从导入的 3D 模型创建 Prefab。
+        ///
+        /// Unity 导入 .glb/.obj 后会生成一个模型资产（GameObject），
+        /// 用 PrefabUtility 将其转为 Prefab，方便拖入场景。
+        /// </summary>
+        private static string CreatePrefabFromModel(string modelAssetPath)
+        {
+            // 尝试加载模型（Unity 的 glTF 导入器可能不兼容 trimesh 导出的 glb）
+            GameObject modelRoot = AssetDatabase.LoadAssetAtPath<GameObject>(modelAssetPath);
+            if (modelRoot == null)
+            {
+                // Prefab 创建失败不影响使用，用户可手动拖 glb 到场景
+                Debug.Log($"[AIGC] GLB 模型已就绪: {modelAssetPath}，可直接拖到场景中使用。");
+                return modelAssetPath;
+            }
+
+            // 生成 Prefab 路径（同目录，.prefab 扩展名）
+            string prefabPath = Path.ChangeExtension(modelAssetPath, ".prefab");
+
+            // 如果已存在同名 Prefab，删除旧的
+            if (AssetDatabase.LoadAssetAtPath<GameObject>(prefabPath) != null)
+            {
+                AssetDatabase.DeleteAsset(prefabPath);
+            }
+
+            // 创建 Prefab
+            GameObject prefab = PrefabUtility.SaveAsPrefabAsset(modelRoot, prefabPath);
+
+            if (prefab != null)
+            {
+                Debug.Log($"[AIGC] Prefab 已创建: {prefabPath}");
+                return prefabPath;
+            }
+
+            Debug.LogWarning($"[AIGC] Prefab 创建失败，使用原始模型路径。");
+            return modelAssetPath;
+        }
+
+        /// <summary>
         /// 生成唯一资产路径，避免覆盖已有文件。
         /// 例如 chest.png 已存在 → chest_001.png, chest_002.png ...
         /// </summary>
-        private static string GetUniqueAssetPath(string baseName)
+        private static string GetUniqueAssetPath(string baseName, string extension = ".png")
         {
-            string candidate = $"{OUTPUT_DIRECTORY}/{baseName}.png";
+            string candidate = $"{OUTPUT_DIRECTORY}/{baseName}{extension}";
 
             if (!File.Exists(Path.Combine(Application.dataPath, "GeneratedAssets",
-                $"{baseName}.png")))
+                $"{baseName}{extension}")))
             {
                 return candidate;
             }
@@ -88,10 +216,10 @@ namespace AIGCAssetGenerator
             for (int i = 1; i <= 999; i++)
             {
                 string numberedName = $"{baseName}_{i:D3}";
-                candidate = $"{OUTPUT_DIRECTORY}/{numberedName}.png";
+                candidate = $"{OUTPUT_DIRECTORY}/{numberedName}{extension}";
 
                 if (!File.Exists(Path.Combine(Application.dataPath, "GeneratedAssets",
-                    $"{numberedName}.png")))
+                    $"{numberedName}{extension}")))
                 {
                     return candidate;
                 }
@@ -99,7 +227,7 @@ namespace AIGCAssetGenerator
 
             // 极端情况：999 个重名，用时间戳兜底
             string timestamp = DateTime.Now.ToString("yyyyMMdd_HHmmss");
-            return $"{OUTPUT_DIRECTORY}/{baseName}_{timestamp}.png";
+            return $"{OUTPUT_DIRECTORY}/{baseName}_{timestamp}{extension}";
         }
 
         /// <summary>
