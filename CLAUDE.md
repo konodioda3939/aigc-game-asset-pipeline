@@ -1,8 +1,12 @@
-# CLAUDE.md — AIGC 项目（LoRA 风格微调）
+# CLAUDE.md — AIGC 游戏资产管线
 
 ## 项目概述
 
-这是一个 AIGC（AI Generated Content）项目，核心目标是通过 LoRA 微调技术，让 Stable Diffusion 学会特定风格的图像生成。
+从**文字/草图**到**游戏资产**的 AI 管线，五个阶段全部打通：
+
+```
+文字描述 → LoRA 生图 → Unity 一键导入 → ControlNet 草图精修 → TripoSR 图片转 3D
+```
 
 **当前进度：**
 
@@ -10,6 +14,19 @@
 |--------|------|------|
 | 里程碑1 | LoRA 风格微调（48张原神参考图 → 训练 → 12.2MB LoRA 权重） | ✅ |
 | 里程碑2 | Python 推理 API（FastAPI 本地 HTTP 服务 + /generate 接口） | ✅ |
+| 里程碑3 | Unity Editor 插件（文生图 + 草图精修双模式、状态检测、一键导入） | ✅ |
+| 里程碑4 | ControlNet 可控生成（Canny 线稿 / Scribble 草图 / Depth 深度） | ✅ |
+| 里程碑5 | TripoSR 图片转 3D 模型（去背景 → 推理 → .glb → Unity Prefab） | ✅ |
+
+**已知局限：**
+
+| 问题 | 说明 |
+|------|------|
+| TripoSR 边界伪影（方壳） | 三平面表示的立方体边界噪声，尚无有效代码解决方案，后续换底模 |
+| TripoSR 只擅长真实物体 | 训练数据为 Objaverse（真实 3D 扫描），二次元角色会崩 |
+| ControlNet 大图会慢 | SD 1.5 原生 512×512，超过 768 会自动缩放（8GB 显存限制） |
+
+---
 
 ## 用户约束（极其重要）
 
@@ -26,6 +43,7 @@
    - ❌ 「我会调整 `train_lora.py` 里的 `learning_rate` 从 1e-4 改到 5e-5」
    - ✅ 「我会把训练参数里的『学习速度』调慢一半，这样模型学得更稳，但需要多花一点时间」
 5. **给出选项而非开放式问题**：当需要用户做选择时，给出 2-3 个具体选项，每个选项说明优缺点，用大白话描述
+6. **不自动推送 GitHub**：修改代码后只 commit 不 push，等用户审查确认功能正常后再推送
 
 ### 输出规范
 - 所有回复使用中文
@@ -38,43 +56,93 @@
 
 | 层级 | 技术 |
 |------|------|
-| 深度学习框架 | PyTorch + CUDA |
-| 模型生态 | HuggingFace Diffusers + PEFT |
-| 基座模型 | Counterfeit-V2.5（动漫专用 SD 1.5 微调） |
-| 打标模型 | WD SwinV2 Tagger v3（ONNX Runtime） |
-| Web 框架 | FastAPI + Uvicorn（推理服务） |
-| Python 环境 | `D:/anaconda3/envs/GPUpytorch-env/python.exe` |
+| 深度学习框架 | PyTorch 2.11 + CUDA 12.8 |
+| 基座模型 | Counterfeit-V2.5（动漫专用 SD 1.5） + LoRA（PEFT, rank=16） |
+| 可控生成 | ControlNet v1.0（Canny / Scribble / Depth），权重 ~1.4GB/模式 |
+| 3D 重建 | TripoSR（Stability AI），单图 → 带贴图 3D mesh（.glb），权重 ~1.68GB |
+| 打标模型 | WD SwinV2 Tagger v3（ONNX Runtime，CPU 推理） |
+| 推理服务 | FastAPI + Uvicorn（本地 HTTP，全局单例加载） |
+| 游戏引擎 | Unity 2022.3 LTS（Editor 插件 + 资产一键导入） |
+| Python 环境 | `D:/anaconda3/envs/GPUpytorch-env/python.exe`（Python 3.11） |
 | GPU | NVIDIA GeForce RTX 4060 Laptop（8 GB 显存） |
+
+---
 
 ## 项目文件结构
 
 ```
 d:\aigc-project\
+├── README.md                       ← 📖 项目文档（给人类看）
+├── CLAUDE.md                       ← AI 协作指南（给 AI 看）
+├── SYSTEM_INFO.md                  ← 硬件/环境/Git 配置
+│
 ├── data/
-│   ├── style_images/          ← 原始参考图（48张 jpg）
-│   └── processed/             ← 512×512 裁切 png + 人工修正后的 .txt 标注
-├── lora_output/               ← 训练产出（adapter_model.safetensors 12.2MB）
-│   ├── adapter_model.safetensors  ← 🔑 核心产出：LoRA 权重文件
-│   ├── adapter_config.json        ← LoRA 配置
-│   ├── checkpoint-200~1200/       ← 训练中间保存点
-│   └── comparison/                ← 里程碑1 加载前后对比图
-├── inference_server/          ← 里程碑2：推理 API 服务
-│   ├── main.py                ← FastAPI 入口（/generate + /health）
-│   ├── model_loader.py        ← 加载 SD + LoRA（全局单例，只加载一次）
-│   ├── start.bat              ← 🔑 双击启动脚本（小白专用）
-│   ├── requirements.txt       ← 服务依赖清单
-│   └── outputs/               ← 生成图片自动存档
-├── preprocess.py              ← 图片裁剪预处理（中心裁切 512×512）
-├── caption.py                 ← WD14 ONNX 自动打标
-├── check_env.py               ← 环境检测（GPU、PyTorch、CUDA）
-├── check_images.py            ← 图片质量检查
-├── review_tags.py             ← 标注审查工具（打印所有标签）
-├── fix_tags.py                ← 批量修正标注（全局增删标签）
-├── train_lora.py              ← LoRA 训练脚本（核心）
-├── inference_compare.py       ← 推理对比脚本（有无 LoRA 对比）
-└── cache/                     ← VAE/CLIP 编码缓存 + HuggingFace 模型缓存
-    └── hub/                   ← 下载的基座模型（~2GB）
+│   ├── style_images/               ← 48张原始参考图（原神角色 AI 绘图）
+│   └── processed/                  ← 512×512 裁切 + 人工修正标注
+│
+├── lora_output/
+│   ├── adapter_model.safetensors   ← 🔑 LoRA 权重（12.2 MB）
+│   ├── adapter_config.json         ← LoRA 配置（rank=16）
+│   └── checkpoint-200~1200/        ← 训练中间保存点
+│
+├── inference_server/               ← 🔑 推理服务（核心）
+│   ├── main.py                     ← FastAPI 入口（3 个接口 + 健康检查）
+│   ├── model_loader.py             ← 模型加载器（SD+LoRA+ControlNet+TripoSR，全局单例）
+│   ├── start.bat                   ← 🚀 双击启动脚本
+│   ├── requirements.txt            ← Python 依赖
+│   ├── install_controlnet.bat      ← ControlNet 额外依赖安装
+│   ├── install_triposr.bat         ← TripoSR 额外依赖安装
+│   ├── torchmcubes.py              ← torchmcubes CPU 兼容层
+│   ├── torchmcubes_compat.py       ← torchmcubes 兼容层（旧版）
+│   └── outputs/                    ← 生成图片/3D 模型存档
+│
+├── unity_plugin/                   ← Unity Editor 插件
+│   └── Assets/Editor/AIGCAssetGenerator/
+│       ├── AIGCWindow.cs           ← Editor 窗口 UI（双模式 + 预览 + 导入）
+│       ├── AIGCClient.cs           ← HTTP 客户端（/generate + /generate-controlled + /generate-3d）
+│       ├── AssetImporter.cs        ← 图片/3D 资产自动导入
+│       └── AIGCSettings.cs         ← Preferences 全局配置
+│
+├── TripoSR/                        ← TripoSR 源码（克隆自 Stability AI）
+│   ├── tsr/system.py               ← TSR 模型类 + extract_mesh
+│   ├── tsr/utils.py                ← remove_background + resize_foreground
+│   └── tsr/models/                 ← NeRF 渲染器 + Transformer + IsoSurface
+│
+├── torchmcubes/                    ← torchmcubes 源码（克隆，CPU 兼容）
+│
+├── train_lora.py                   ← LoRA 训练脚本
+├── preprocess.py                   ← 图片裁剪预处理（中心裁切 512×512）
+├── caption.py                      ← WD14 ONNX 自动打标
+├── inference_compare.py            ← LoRA 加载前后对比推理
+├── check_env.py                    ← 环境检测（GPU、PyTorch、CUDA）
+├── check_images.py                 ← 图片质量检查
+├── review_tags.py                  ← 标注审查（打印所有标签）
+├── fix_tags.py                     ← 批量修正标注（全局增删标签）
+│
+├── 1.Lora生图.mp4                  ← 🎥 阶段1 演示
+├── 2.ControlNet修图.mp4            ← 🎥 阶段2+4 演示
+├── 3.TripoSR转3d.mp4               ← 🎥 阶段5 演示
+│
+└── cache/hub/                      ← 模型缓存（~8GB，不上传 Git）
+    ├── models--gsdf--Counterfeit-V2.5/   ← 基座模型（~2GB）
+    └── controlnet/                       ← ControlNet 权重（每模式 ~1.4GB）
 ```
+
+---
+
+## API 接口一览
+
+| 接口 | 方法 | 用途 |
+|------|------|------|
+| `/generate` | POST | 纯文本生图（prompt → PNG），向后兼容 |
+| `/generate-controlled` | POST | ControlNet 可控生成（参考图 + prompt → 精修图） |
+| `/generate-3d` | POST | TripoSR 图片转 3D 模型（图片 → .glb） |
+| `/health` | GET | 服务状态 + 已加载模型信息 |
+| `/docs` | GET | Swagger 可视化文档（可手动测试） |
+
+详见 README.md 中各阶段的参数说明。
+
+---
 
 ## 关键技术细节（供 AI 参考）
 
@@ -92,69 +160,141 @@ d:\aigc-project\
 - **必须同时使用** GradScaler + clip_grad_norm
 - **LoRA 基座必须一致**：在哪个模型训练就在哪个模型推理
 
-### 推理加载
+### 推理加载（txt2img）
 - PEFT 保存的 LoRA 不能直接用 `pipe.load_lora_weights()` 加载
 - 正确方式：`PeftModel.from_pretrained(pipe.unet, path)` → `merge_and_unload()`
 - 融合后推理速度和不加 LoRA 一样快（LoRA 已被吸收进 UNet 原始权重）
 - scheduler 使用 DPMSolverMultistepScheduler（比默认 DDPM 快 2-3 倍）
 
-### 推理服务
-- 框架：FastAPI + Uvicorn
-- 全局单例：管线只加载一次，所有请求复用
-- 设备：CUDA（fp16）优先，CPU（fp32）回退
-- 内存优化：`attention_slicing` 已启用（8GB 卡够用）
+### ControlNet 可控生成
+
+**三种模式：**
+
+| 模式 | 预处理 | 用途 |
+|------|--------|------|
+| `canny` | OpenCV Canny 边缘检测 | 清晰轮廓/线稿 → 保持结构上色 |
+| `scribble` | HED 检测器（controlnet_aux） | 随手涂鸦 → 概念图 |
+| `depth` | MiDaS 深度估计（controlnet_aux） | 照片/3D图 → 保持空间关系 |
+
+**模型下载策略**（`model_loader.py`）：
+- **优先级**：HuggingFace 镜像（hf-mirror.com）→ HuggingFace 直连 → ModelScope 兜底
+- **智能按需下载**：只下载 config.json + 一个权重文件（优先 fp16 ~725MB，回退 fp32 ~1.45GB），不全仓库下载
+- **404 不重试**：`_download_single_file` 对 404 立即抛出，上层秒级回退到 fp32
+- **缓存复用**：下载到 `cache/hub/controlnet/<repo-id>/`，重启跳过下载
+- **管线共享**：ControlNet 与 txt2img 共享 UNet/VAE/TextEncoder，不重复占显存
+
+**输入图自动缩放**：
+- SD 1.5 原生 512×512，超过 768 后速度暴跌（8GB 显存）
+- `_resize_for_controlnet()` 自动将长边 > 768 的图等比缩小，尺寸对齐到 8 的倍数
+- API 参数 `max_size` 可覆盖（默认 768）
+
+**scribble 预处理注意**：
+- HED 检测器可能改变输出尺寸，代码有对齐逻辑（`main.py` 第 2.5 步）
+- controlnet_aux 首次使用会下载 HED/MiDaS 模型，有 mediapipe/timm 警告（可忽略）
+
+### TripoSR 图片转 3D
+
+**预处理流程**（`main.py` `/generate-3d`）：
+```
+上传图片 → remove_background (rembg 抠图)
+         → resize_foreground (ratio=0.85，裁剪主体并居中)
+         → 转 RGB（灰色背景合成）
+         → 存入 TripoSR 模型
+```
+
+**推理与提取**：
+```
+TSR 前向推理 → scene_codes (triplane 特征)
+             → extract_mesh(scene_codes, resolution=256, threshold=25.0)
+             → Marching Cubes 提取等值面
+             → trimesh 导出 .glb（贴图内嵌）
+```
+
+**显存优化**：
+- 渲染器分块：`model.renderer.set_chunk_size(4096)`，避免 256³ 的 16M 点同时查询
+- OOM 自动降级：推理/提取失败时 resolution 减半重试
+- 提取后 `del scene_codes` + `torch.cuda.empty_cache()`
+
+**torchmcubes 兼容**：
+- `torchmcubes/` 是克隆的 C++ 扩展源码，需要 Visual Studio 编译
+- `inference_server/torchmcubes.py` 是纯 Python CPU 兼容层（基于 skimage），无需编译
+- `inference_server/torchmcubes_compat.py` 是旧版兼容层，保留以防回退
+- `model_loader.py` 将 `inference_server/` 加入 `sys.path` 优先于 `torchmcubes/`
+
+**已知局限**：
+- **边界伪影（方壳）**：三平面立方体边界噪声，密度阈值/连通分量/壳面检测均无法根治，后续换底模解决
+- 只擅长真实物体（训练数据 Objaverse），二次元角色会崩
+- rembg 抠图在白色物体+白色背景时可能失败
+
+---
+
+## 推理服务（inference_server/）
+
+### 架构
+- **全局单例**：SD + LoRA 只加载一次，所有请求复用 UNet/VAE/TextEncoder
+- **懒加载**：ControlNet 和 TripoSR 模型按需加载，首次使用自动下载
+- **设备**：CUDA（fp16）优先，CPU（fp32）回退
+- **内存优化**：`attention_slicing` 已启用
+
+### 启动
+```bash
+# 方式1：双击（最简单）
+inference_server/start.bat
+
+# 方式2：命令行
+cd d:\aigc-project\inference_server
+D:/anaconda3/envs/GPUpytorch-env/python.exe -m uvicorn main:app --host 127.0.0.1 --port 8000
+```
+
+启动后访问 `http://127.0.0.1:8000/docs` 可视化测试。
+
+### 重要约定
 - **Windows 启动**：用 `python -m uvicorn` 而非裸 `uvicorn`（后者不在 PATH）
 - **print 必须加 flush=True**：否则启动日志被缓冲，用户看不到进度会以为卡了
-- FastAPI 自带 `/docs` 可视化接口页面，适合技术小白手动测试
+- **代码修改需重启服务才能生效**：关掉窗口 → 重新双击 start.bat
+
+---
+
+## 网络注意事项
+
+| 场景 | 配置 |
+|------|------|
+| HuggingFace 下载 | `HF_ENDPOINT = 'https://hf-mirror.com'`（必须在 import diffusers 之前） |
+| HuggingFace 超时 | `HF_HUB_DOWNLOAD_TIMEOUT = '600'`（10 分钟） |
+| GitHub 推送 | **用 SSH**（`git@github.com:konodioda3939/aigc-game-asset-pipeline.git`），不用 HTTPS |
+| pip 安装 | 可用清华源 `-i https://pypi.tuna.tsinghua.edu.cn/simple` |
 
 ---
 
 ## 常用操作
 
-### 启动推理服务
-
-**方式1：双击 start.bat（最简单）**
-```
-双击 d:\aigc-project\inference_server\start.bat
-```
-
-**方式2：命令行**
+### Python 环境
 ```bash
-cd d:\aigc-project\inference_server
-D:/anaconda3/envs/GPUpytorch-env/python.exe -m uvicorn main:app --host 127.0.0.1 --port 8000
-```
-
-启动后访问：
-- API 文档（可视化测试）：`http://127.0.0.1:8000/docs`
-- 健康检查：`http://127.0.0.1:8000/health`
-
-### 停止推理服务
-- 关掉命令行窗口
-- 或按 `Ctrl+C`
-
-### 命令行测试生成
-```bash
-curl -X POST http://127.0.0.1:8000/generate \
-  -H "Content-Type: application/json" \
-  -d '{"prompt": "1girl, raiden shogun, purple hair, masterpiece"}' \
-  -o output.png
-```
-
-### 运行 Python 脚本
-```bash
-cd d:\aigc-project
+# 所有脚本都用这个 Python
 D:/anaconda3/envs/GPUpytorch-env/python.exe <脚本名>.py
+
+# 安装包
+D:/anaconda3/envs/GPUpytorch-env/python.exe -m pip install <包名>
+```
+
+### Git
+```bash
+cd d:/aigc-project
+
+# 查看状态
+git status
+
+# 提交（不推送）
+git add <文件>
+git commit -m "描述"
+
+# 推送（用户确认后）
+git push origin master:main
 ```
 
 ### 检查环境
 ```bash
 D:/anaconda3/envs/GPUpytorch-env/python.exe check_env.py
-```
-
-### 安装推理服务依赖（首次使用需执行一次）
-```bash
-cd d:\aigc-project\inference_server
-D:/anaconda3/envs/GPUpytorch-env/python.exe -m pip install -r requirements.txt
 ```
 
 ---
