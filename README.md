@@ -30,9 +30,11 @@
 
 ## 🎬 演示视频
 
-📹 **[观看完整演示](./2026-06-25%2019-27-02.mp4)**（2 分钟录屏）
-
-> 视频展示了从启动推理服务到资产出现在 Unity 场景中的完整流程。
+| 阶段 | 视频 | 内容 |
+|------|------|------|
+| 阶段 1 | 📹 [1. LoRA 文生图](./1.Lora生图.mp4) | LoRA 风格微调 → FastAPI 文本生图 |
+| 阶段 2+4 | 📹 [2. ControlNet 修图](./2.ControlNet修图.mp4) | Unity 插件 + 草图/线稿 → AI 精修 |
+| 阶段 5 | 📹 [3. TripoSR 转 3D](./3.TripoSR转3d.mp4) | 图片去背景 → AI 生成 3D 模型 → Unity |
 
 ---
 
@@ -75,7 +77,9 @@ aigc-project/
 ├── caption.py                      ← WD14 ONNX 自动打标
 ├── inference_compare.py            ← LoRA 加载前后对比推理
 │
-└── 2026-06-25 19-27-02.mp4         ← 🎥 演示录屏
+├── 1.Lora生图.mp4                   ← 🎥 阶段1 演示：LoRA 文生图
+├── 2.ControlNet修图.mp4             ← 🎥 阶段2+4 演示：ControlNet 草图精修
+└── 3.TripoSR转3d.mp4                ← 🎥 阶段5 演示：图片转 3D 模型
 ```
 
 ---

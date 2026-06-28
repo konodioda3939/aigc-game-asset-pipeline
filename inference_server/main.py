@@ -423,8 +423,6 @@ async def generate_3d(
     prompt: str = Form("", description="预留参数，TripoSR 不使用 prompt"),
     output_format: str = Form("glb", description="输出格式: glb 或 obj"),
     resolution: int = Form(256, ge=128, le=512, description="Mesh 精度（128=快, 256=标准, 512=高精度）"),
-    density_threshold: float = Form(45.0, ge=10.0, le=100.0, description="密度阈值，越高越过滤边界伪影（默认 45，原版 25）"),
-    foreground_ratio: float = Form(0.85, ge=0.3, le=0.95, description="前景占比（默认 0.85），调大可减少边界留白"),
     seed: int | None = Form(None, description="TripoSR 是确定性模型，seed 作用有限"),
 ):
     """
@@ -433,9 +431,6 @@ async def generate_3d(
     - **image**: 必须，输入的角色/物体图片
     - **output_format**: glb（推荐，贴图内嵌，Unity 原生支持）或 obj
     - **resolution**: 128=快速预览, 256=标准质量, 512=最高精度（更慢）
-    - **density_threshold**: 密度阈值（默认 45）。调高可去除边界噪声，过高会削掉薄结构
-    - **foreground_ratio**: 前景占比（默认 0.55）。调小留更多透明边距，
-      让三平面边界远离物体，方壳能被连通分量过滤去除
     """
     from tsr.utils import remove_background, resize_foreground
 
@@ -463,7 +458,7 @@ async def generate_3d(
         ref_image.save(rembg_path)
         print(f"[generate-3d] 已保存去背景结果: {rembg_path}", flush=True)
 
-        ref_image = resize_foreground(ref_image, foreground_ratio)  # 需要 RGBA 做裁剪
+        ref_image = resize_foreground(ref_image, 0.85)  # 需要 RGBA 做裁剪
         ref_image = ref_image.convert("RGB")  # 裁剪完后转 RGB，TripoSR 需要
         print(f"[generate-3d] 预处理完成, size={ref_image.size}", flush=True)
 
@@ -514,47 +509,19 @@ async def generate_3d(
 
     # ---- 6. 提取 mesh ----
     try:
-        print(f"[generate-3d] 正在提取 3D mesh (threshold={density_threshold})...", flush=True)
-        mesh = model.extract_mesh(scene_codes, has_vertex_color=True, resolution=resolution, threshold=density_threshold)[0]
+        print("[generate-3d] 正在提取 3D mesh...", flush=True)
+        mesh = model.extract_mesh(scene_codes, has_vertex_color=True, resolution=resolution)[0]
         print(f"[generate-3d] mesh: {len(mesh.vertices)} 顶点, {len(mesh.faces)} 面", flush=True)
     except torch.cuda.OutOfMemoryError:
         fallback_res = max(128, resolution // 2)
         print(f"[generate-3d] 提取 mesh 时显存不足，降级到 resolution={fallback_res}...", flush=True)
         torch.cuda.empty_cache()
         model.set_marching_cubes_resolution(fallback_res)
-        mesh = model.extract_mesh(scene_codes, has_vertex_color=True, resolution=fallback_res, threshold=density_threshold)[0]
+        mesh = model.extract_mesh(scene_codes, has_vertex_color=True, resolution=fallback_res)[0]
         print(f"[generate-3d] mesh: {len(mesh.vertices)} 顶点, {len(mesh.faces)} 面", flush=True)
     except Exception as e:
         print(f"[generate-3d] Mesh 提取失败: {traceback.format_exc()}", flush=True)
         raise HTTPException(status_code=500, detail=f"Mesh 提取失败: {str(e)}")
-
-    # ---- 7. 后处理：去除边界伪影（方壳）----
-    # TripoSR 的三平面立方体边界处会产生低密度噪声，
-    # 这些噪声在 Marching Cubes 后形成贴在包围盒面上的平直面片（方壳）。
-    # 橘子本体是曲面，壳是平面——检测每个面片是否落在包围盒平面上，是则删除。
-    try:
-        verts = mesh.vertices
-        faces = mesh.faces
-        bmin = verts.min(axis=0)
-        bmax = verts.max(axis=0)
-        eps = (bmax - bmin).max() * 0.005  # 壳面判定容差（包围盒最大边的 0.5%）
-
-        is_shell = np.zeros(len(faces), dtype=bool)
-        for axis in range(3):  # X, Y, Z
-            for bound in (bmin[axis], bmax[axis]):
-                # 三个顶点都在同一包围盒平面附近 → 壳面
-                on_plane = np.abs(verts[faces][:, :, axis] - bound).max(axis=1) < eps
-                is_shell |= on_plane
-
-        shell_count = is_shell.sum()
-        if shell_count > 0:
-            mesh.update_faces(~is_shell)
-            mesh.remove_unreferenced_vertices()
-            print(f"[generate-3d] 壳面过滤: 删除 {shell_count} 面 "
-                  f"({shell_count/len(faces)*100:.1f}%), "
-                  f"剩余 {len(mesh.faces)} 面", flush=True)
-    except Exception:
-        print("[generate-3d] 壳面过滤跳过（处理异常）", flush=True)
 
     # ---- 8. 导出 ----
     try:
