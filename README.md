@@ -354,7 +354,7 @@ Unity：写入 Assets/ → ModelImporter → 自动创建 Prefab → Ping 到 Pr
 |------|------|----------|
 | 简单物体效果好，复杂角色崩 | TripoSR 训练数据为真实 3D 扫描（Objaverse） | 换用角色专用模型 |
 | 背面/遮挡区域颜色不准 | 单视角输入，背面靠模型猜 | 多视角输入（TRELLIS） |
-| 曲面有方块感 | Marching Cubes 网格分辨率限制 | 提高 resolution 或换 FlexiCubes |
+| 边界伪影（方壳） | TripoSR 三平面表示的立方体边界噪声 | 尚无有效解决方案，后续换底模 |
 
 > **核心价值**：整条「图片 → 3D → Unity Prefab」管线已打通。后续只需升级底模就可以改善质量，不用改架构。
 
