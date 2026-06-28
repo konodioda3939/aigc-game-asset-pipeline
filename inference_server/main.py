@@ -423,7 +423,7 @@ async def generate_3d(
     prompt: str = Form("", description="预留参数，TripoSR 不使用 prompt"),
     output_format: str = Form("glb", description="输出格式: glb 或 obj"),
     resolution: int = Form(256, ge=128, le=512, description="Mesh 精度（128=快, 256=标准, 512=高精度）"),
-    density_threshold: float = Form(30.0, ge=10.0, le=100.0, description="密度阈值，越高越过滤边界伪影（默认 30，原版 25）"),
+    density_threshold: float = Form(45.0, ge=10.0, le=100.0, description="密度阈值，越高越过滤边界伪影（默认 45，原版 25）"),
     seed: int | None = Form(None, description="TripoSR 是确定性模型，seed 作用有限"),
 ):
     """
