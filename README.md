@@ -167,7 +167,8 @@ adapter_model.safetensors (12.2 MB)
 | 接口 | 方法 | 说明 |
 |------|------|------|
 | `/generate` | POST | 传入 prompt，返回 PNG 图片（纯文本生图） |
-| `/generate-controlled` | POST | 上传参考图 + prompt，返回 AI 精修图（草图/线稿 → 成品） |
+| `/generate-controlled` | POST | 上传参考图 + prompt，AI 保持结构精修（详见阶段 4） |
+| `/generate-3d` | POST | 上传图片 → AI 生成 3D 模型（详见阶段 5） |
 | `/health` | GET | 服务状态检测 |
 | `/docs` | GET | Swagger 可视化文档（可手动测试） |
 
@@ -178,18 +179,6 @@ adapter_model.safetensors (12.2 MB)
 | `prompt` | 必填 | 英文描述，最长 1000 字符 |
 | `steps` | 25 | 推理步数（10~100） |
 | `guidance_scale` | 7.5 | 引导强度（1~20） |
-| `seed` | 随机 | 固定种子可复现 |
-
-**`/generate-controlled` 请求参数**（新增）：
-
-| 参数 | 默认值 | 说明 |
-|------|--------|------|
-| `image` | 必填 | 参考图文件（PNG/JPG） |
-| `prompt` | 必填 | 英文描述 |
-| `control_mode` | `"canny"` | 控制方式：`canny` / `scribble` / `depth` |
-| `steps` | 25 | 推理步数 |
-| `guidance_scale` | 7.5 | 引导强度 |
-| `control_strength` | 0.8 | 控制力度（0.1~2.0） |
 | `seed` | 随机 | 固定种子可复现 |
 
 **测试性能**（RTX 4060 Laptop, 512×512, 25 steps）：
@@ -283,13 +272,25 @@ ControlNet + 融合了 LoRA 的 UNet → 生成精修图
 返回 PNG + 自动存档（参考图、预处理图、生成图各一份）
 ```
 
+**API 参数**（`POST /generate-controlled`）：
+
+| 参数 | 默认值 | 说明 |
+|------|--------|------|
+| `image` | 必填 | 参考图文件（PNG/JPG） |
+| `prompt` | 必填 | 英文描述 |
+| `control_mode` | `"canny"` | 控制方式：`canny` / `scribble` / `depth` |
+| `steps` | 25 | 推理步数 |
+| `guidance_scale` | 7.5 | 引导强度 |
+| `control_strength` | 0.8 | 控制力度（0.1~2.0） |
+| `max_size` | 768 | 输入图最大边长（SD 1.5 原生 512，过大自动缩放） |
+| `seed` | 随机 | 固定种子可复现 |
+
 **设计亮点**：
 
 - 与 txt2img 管线共享 UNet/VAE/TextEncoder，不重复占显存
 - 三模式合计最大约 4.2GB（8GB 显存轻松跑）
-- 三级下载策略（ModelScope → HF 镜像 → HF 直连），国内网络友好
-- 模型下载一次后本地缓存，重启秒加载、不联网
-- 每个模式仅需 ~725MB（fp16），按需下载不浪费
+- 智能按需下载（每个模式 ~725MB fp16），一次下载永久缓存，重启秒加载
+- 输入图自动缩放（长边 > 768 等比缩小），避免 1024×1024 撑爆显存
 - Unity 插件支持模式切换 + 参考图拖入 + 实时预览
 
 > 📖 详细文档见 [ControlNet阶段总结.md](./ControlNet阶段总结.md)
@@ -336,7 +337,7 @@ Unity：写入 Assets/ → ModelImporter → 自动创建 Prefab → Ping 到 Pr
 
 **设计亮点**：
 
-- 下载与缓存策略同 Stage 4（ModelScope → HF 镜像 → HF 直连），模型缓存复用
+- 下载与缓存策略同阶段 4（HF 镜像优先 → 智能按需下载），模型缓存复用
 - HF 权重键名自动转换（适配新版 ViT 架构）
 - torchmcubes 用 CPU 兼容层替代（skimage），无需 Visual Studio 编译
 - 渲染器分块处理（chunk_size=4096），8GB 显存安全
