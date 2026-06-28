@@ -423,6 +423,7 @@ async def generate_3d(
     prompt: str = Form("", description="预留参数，TripoSR 不使用 prompt"),
     output_format: str = Form("glb", description="输出格式: glb 或 obj"),
     resolution: int = Form(256, ge=128, le=512, description="Mesh 精度（128=快, 256=标准, 512=高精度）"),
+    density_threshold: float = Form(30.0, ge=10.0, le=100.0, description="密度阈值，越高越过滤边界伪影（默认 30，原版 25）"),
     seed: int | None = Form(None, description="TripoSR 是确定性模型，seed 作用有限"),
 ):
     """
@@ -431,6 +432,7 @@ async def generate_3d(
     - **image**: 必须，输入的角色/物体图片
     - **output_format**: glb（推荐，贴图内嵌，Unity 原生支持）或 obj
     - **resolution**: 128=快速预览, 256=标准质量, 512=最高精度（更慢）
+    - **density_threshold**: 密度阈值（默认 30）。调高可去除边界「方壳」伪影，但过高会削掉薄结构
     """
     from tsr.utils import remove_background, resize_foreground
 
@@ -509,15 +511,15 @@ async def generate_3d(
 
     # ---- 6. 提取 mesh ----
     try:
-        print("[generate-3d] 正在提取 3D mesh...", flush=True)
-        mesh = model.extract_mesh(scene_codes, has_vertex_color=True, resolution=resolution)[0]
+        print(f"[generate-3d] 正在提取 3D mesh (threshold={density_threshold})...", flush=True)
+        mesh = model.extract_mesh(scene_codes, has_vertex_color=True, resolution=resolution, threshold=density_threshold)[0]
         print(f"[generate-3d] mesh: {len(mesh.vertices)} 顶点, {len(mesh.faces)} 面", flush=True)
     except torch.cuda.OutOfMemoryError:
         fallback_res = max(128, resolution // 2)
         print(f"[generate-3d] 提取 mesh 时显存不足，降级到 resolution={fallback_res}...", flush=True)
         torch.cuda.empty_cache()
         model.set_marching_cubes_resolution(fallback_res)
-        mesh = model.extract_mesh(scene_codes, has_vertex_color=True, resolution=fallback_res)[0]
+        mesh = model.extract_mesh(scene_codes, has_vertex_color=True, resolution=fallback_res, threshold=density_threshold)[0]
         print(f"[generate-3d] mesh: {len(mesh.vertices)} 顶点, {len(mesh.faces)} 面", flush=True)
     except Exception as e:
         print(f"[generate-3d] Mesh 提取失败: {traceback.format_exc()}", flush=True)
