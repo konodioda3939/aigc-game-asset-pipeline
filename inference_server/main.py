@@ -424,7 +424,7 @@ async def generate_3d(
     output_format: str = Form("glb", description="输出格式: glb 或 obj"),
     resolution: int = Form(256, ge=128, le=512, description="Mesh 精度（128=快, 256=标准, 512=高精度）"),
     density_threshold: float = Form(45.0, ge=10.0, le=100.0, description="密度阈值，越高越过滤边界伪影（默认 45，原版 25）"),
-    foreground_ratio: float = Form(0.55, ge=0.3, le=0.9, description="前景占比，越小留白越多、方壳越易分离（默认 0.55，原版 0.85）"),
+    foreground_ratio: float = Form(0.85, ge=0.3, le=0.95, description="前景占比（默认 0.85），调大可减少边界留白"),
     seed: int | None = Form(None, description="TripoSR 是确定性模型，seed 作用有限"),
 ):
     """
@@ -529,20 +529,32 @@ async def generate_3d(
         raise HTTPException(status_code=500, detail=f"Mesh 提取失败: {str(e)}")
 
     # ---- 7. 后处理：去除边界伪影（方壳）----
-    # TripoSR 的三平面表示在一个立方体内预测密度，
-    # 边界附近的低密度噪声会被 Marching Cubes 提取为薄壳。
-    # 用连通分量拆分 mesh，只保留面数最大的那块（橘子本体），丢弃壳碎片。
+    # TripoSR 的三平面立方体边界处会产生低密度噪声，
+    # 这些噪声在 Marching Cubes 后形成贴在包围盒面上的平直面片（方壳）。
+    # 橘子本体是曲面，壳是平面——检测每个面片是否落在包围盒平面上，是则删除。
     try:
-        components = mesh.split(only_watertight=False)
-        if len(components) > 1:
-            components.sort(key=lambda m: len(m.faces), reverse=True)
-            sizes = [len(c.faces) for c in components]
-            mesh = components[0]
-            print(f"[generate-3d] 连通分量过滤: {len(components)} 块 → 保留最大的 "
-                  f"({len(mesh.faces)} 面, 丢弃 {sizes[1:]} 面)", flush=True)
+        verts = mesh.vertices
+        faces = mesh.faces
+        bmin = verts.min(axis=0)
+        bmax = verts.max(axis=0)
+        eps = (bmax - bmin).max() * 0.005  # 壳面判定容差（包围盒最大边的 0.5%）
+
+        is_shell = np.zeros(len(faces), dtype=bool)
+        for axis in range(3):  # X, Y, Z
+            for bound in (bmin[axis], bmax[axis]):
+                # 三个顶点都在同一包围盒平面附近 → 壳面
+                on_plane = np.abs(verts[faces][:, :, axis] - bound).max(axis=1) < eps
+                is_shell |= on_plane
+
+        shell_count = is_shell.sum()
+        if shell_count > 0:
+            mesh.update_faces(~is_shell)
+            mesh.remove_unreferenced_vertices()
+            print(f"[generate-3d] 壳面过滤: 删除 {shell_count} 面 "
+                  f"({shell_count/len(faces)*100:.1f}%), "
+                  f"剩余 {len(mesh.faces)} 面", flush=True)
     except Exception:
-        # trimesh 版本兼容问题，跳过过滤，不影响生成
-        print("[generate-3d] 连通分量过滤跳过（trimesh 版本不兼容）", flush=True)
+        print("[generate-3d] 壳面过滤跳过（处理异常）", flush=True)
 
     # ---- 8. 导出 ----
     try:
