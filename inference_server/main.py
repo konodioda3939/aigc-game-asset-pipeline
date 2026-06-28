@@ -525,6 +525,22 @@ async def generate_3d(
         print(f"[generate-3d] Mesh 提取失败: {traceback.format_exc()}", flush=True)
         raise HTTPException(status_code=500, detail=f"Mesh 提取失败: {str(e)}")
 
+    # ---- 7. 后处理：去除边界伪影（方壳）----
+    # TripoSR 的三平面表示在一个立方体内预测密度，
+    # 边界附近的低密度噪声会被 Marching Cubes 提取为薄壳。
+    # 用连通分量拆分 mesh，只保留面数最大的那块（橘子本体），丢弃壳碎片。
+    try:
+        components = mesh.split(only_watertight=False)
+        if len(components) > 1:
+            components.sort(key=lambda m: len(m.faces), reverse=True)
+            sizes = [len(c.faces) for c in components]
+            mesh = components[0]
+            print(f"[generate-3d] 连通分量过滤: {len(components)} 块 → 保留最大的 "
+                  f"({len(mesh.faces)} 面, 丢弃 {sizes[1:]} 面)", flush=True)
+    except Exception:
+        # trimesh 版本兼容问题，跳过过滤，不影响生成
+        print("[generate-3d] 连通分量过滤跳过（trimesh 版本不兼容）", flush=True)
+
     # ---- 8. 导出 ----
     try:
         model_bytes = io.BytesIO()
