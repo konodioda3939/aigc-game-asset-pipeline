@@ -35,6 +35,7 @@
 | 阶段 1 | 📹 [1. LoRA 文生图](./1.Lora生图.mp4) | LoRA 风格微调 → FastAPI 文本生图 |
 | 阶段 2+4 | 📹 [2. ControlNet 修图](./2.ControlNet修图.mp4) | Unity 插件 + 草图/线稿 → AI 精修 |
 | 阶段 5 | 📹 [3. TripoSR 转 3D](./3.TripoSR转3d.mp4) | 图片去背景 → AI 生成 3D 模型 → Unity |
+| 阶段 6 | 📹 [4. PBR 材质生成](./4.生成PBR材质.mp4) | prompt → StableMaterials 生成贴图 → Unity Material |
 
 ---
 
