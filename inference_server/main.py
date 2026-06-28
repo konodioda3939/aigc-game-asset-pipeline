@@ -424,6 +424,7 @@ async def generate_3d(
     output_format: str = Form("glb", description="输出格式: glb 或 obj"),
     resolution: int = Form(256, ge=128, le=512, description="Mesh 精度（128=快, 256=标准, 512=高精度）"),
     density_threshold: float = Form(45.0, ge=10.0, le=100.0, description="密度阈值，越高越过滤边界伪影（默认 45，原版 25）"),
+    foreground_ratio: float = Form(0.55, ge=0.3, le=0.9, description="前景占比，越小留白越多、方壳越易分离（默认 0.55，原版 0.85）"),
     seed: int | None = Form(None, description="TripoSR 是确定性模型，seed 作用有限"),
 ):
     """
@@ -432,7 +433,9 @@ async def generate_3d(
     - **image**: 必须，输入的角色/物体图片
     - **output_format**: glb（推荐，贴图内嵌，Unity 原生支持）或 obj
     - **resolution**: 128=快速预览, 256=标准质量, 512=最高精度（更慢）
-    - **density_threshold**: 密度阈值（默认 30）。调高可去除边界「方壳」伪影，但过高会削掉薄结构
+    - **density_threshold**: 密度阈值（默认 45）。调高可去除边界噪声，过高会削掉薄结构
+    - **foreground_ratio**: 前景占比（默认 0.55）。调小留更多透明边距，
+      让三平面边界远离物体，方壳能被连通分量过滤去除
     """
     from tsr.utils import remove_background, resize_foreground
 
@@ -460,7 +463,7 @@ async def generate_3d(
         ref_image.save(rembg_path)
         print(f"[generate-3d] 已保存去背景结果: {rembg_path}", flush=True)
 
-        ref_image = resize_foreground(ref_image, 0.85)  # 需要 RGBA 做裁剪
+        ref_image = resize_foreground(ref_image, foreground_ratio)  # 需要 RGBA 做裁剪
         ref_image = ref_image.convert("RGB")  # 裁剪完后转 RGB，TripoSR 需要
         print(f"[generate-3d] 预处理完成, size={ref_image.size}", flush=True)
 
