@@ -295,7 +295,12 @@ def _download_single_file(
 
 def load_controlnet_model(control_mode: str) -> ControlNetModel:
     """
-    加载 ControlNet 模型（优先 ModelScope 国内镜像，备选 HuggingFace）。
+    加载 ControlNet 模型。
+
+    下载优先级（从省流量和缓存复用角度排序）：
+      1. HuggingFace 镜像（hf-mirror.com）→ 只下载 2 个文件（~725MB fp16 或 ~1.45GB fp32）
+      2. HuggingFace 直连 → 同上，作为镜像不可用时的备选
+      3. ModelScope snapshot → 最后手段（会下载整个仓库 ~4GB，但国内网络更稳）
     """
     if control_mode not in CONTROLNET_MODEL_SOURCES:
         raise ValueError(
@@ -308,32 +313,28 @@ def load_controlnet_model(control_mode: str) -> ControlNetModel:
 
     device, dtype = _detect_device()
     sources = CONTROLNET_MODEL_SOURCES[control_mode]
-
-    # --- 策略 1：优先尝试 ModelScope（国内网络友好）---
-    modelscope_id = sources.get("modelscope")
-    if modelscope_id:
-        print(f"[model_loader] 通过 ModelScope 下载: {modelscope_id} ...", flush=True)
-        local_path = _download_via_modelscope(modelscope_id, CACHE_DIR / "modelscope")
-        if local_path:
-            print(f"[model_loader] ModelScope 下载完成: {local_path}", flush=True)
-            controlnet = ControlNetModel.from_pretrained(
-                local_path, torch_dtype=dtype,
-            )
-            _controlnet_models[control_mode] = controlnet
-            print(f"[model_loader] ControlNet [{control_mode}] 加载完成。", flush=True)
-            return controlnet
-        print("[model_loader] ModelScope 下载失败，尝试 HuggingFace 镜像...", flush=True)
-
-    # --- 策略 2：HuggingFace 镜像下载（先下载文件到本地，再加载）---
     hf_id = sources["hf"]
-    print(f"[model_loader] 通过 HuggingFace 下载: {hf_id} ...", flush=True)
 
+    # --- 策略 1：HuggingFace 镜像（只下载 2 个文件，最省流量）---
+    print(f"[model_loader] 通过 HuggingFace 镜像下载: {hf_id} ...", flush=True)
     controlnet = _download_and_load_controlnet(hf_id, dtype, use_mirror=True)
 
+    # --- 策略 2：HuggingFace 直连（不走镜像）---
     if controlnet is None:
-        # --- 策略 3：直连 HuggingFace（不走镜像），作为最后兜底 ---
-        print("[model_loader] 镜像所有尝试均失败，尝试直连 HuggingFace（不走镜像）...", flush=True)
+        print("[model_loader] HuggingFace 镜像失败，尝试直连 huggingface.co ...", flush=True)
         controlnet = _download_and_load_controlnet(hf_id, dtype, use_mirror=False)
+
+    # --- 策略 3：ModelScope snapshot（最后手段，会下载整个仓库 ~4GB）---
+    if controlnet is None:
+        modelscope_id = sources.get("modelscope")
+        if modelscope_id:
+            print(f"[model_loader] HuggingFace 均失败，尝试 ModelScope: {modelscope_id} ...", flush=True)
+            local_path = _download_via_modelscope(modelscope_id, CACHE_DIR / "modelscope")
+            if local_path:
+                print(f"[model_loader] ModelScope 下载完成: {local_path}", flush=True)
+                controlnet = ControlNetModel.from_pretrained(
+                    local_path, torch_dtype=dtype,
+                )
 
     if controlnet is None:
         raise RuntimeError(
@@ -342,9 +343,9 @@ def load_controlnet_model(control_mode: str) -> ControlNetModel:
             f"{'='*60}\n"
             f"\n"
             f"  已尝试：\n"
-            f"    1. ModelScope 国内镜像\n"
-            f"    2. HuggingFace 镜像 (hf-mirror.com，10 次重试)\n"
-            f"    3. HuggingFace 直连 (huggingface.co，10 次重试)\n"
+            f"    1. HuggingFace 镜像 (hf-mirror.com，10 次重试)\n"
+            f"    2. HuggingFace 直连 (huggingface.co，10 次重试)\n"
+            f"    3. ModelScope 国内镜像 (modelscope.cn)\n"
             f"\n"
             f"  手动解决方案：\n"
             f"    方式 A（推荐）：换个网络好的时段，重启服务自动重试\n"
