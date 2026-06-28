@@ -303,6 +303,105 @@ namespace AIGCAssetGenerator
         }
 
         /// <summary>
+        /// PBR 材质生成：发送 prompt 到推理服务，接收包含所有纹理贴图的 ZIP。
+        /// </summary>
+        /// <param name="prompt">材质描述，如 "rough stone wall"</param>
+        /// <param name="steps">推理步数（LCM 默认 4）</param>
+        /// <param name="guidanceScale">引导强度</param>
+        /// <param name="tileable">是否生成无缝贴图</param>
+        /// <param name="seed">随机种子</param>
+        /// <returns>(textures字典, filename, seed)</returns>
+        public static async Task<(
+            System.Collections.Generic.Dictionary<string, byte[]> textures,
+            string filename,
+            string seed
+        )> GeneratePBR(
+            string prompt,
+            int steps = 25,
+            float guidanceScale = 10.0f,
+            bool tileable = true,
+            int? seed = null)
+        {
+            if (string.IsNullOrWhiteSpace(prompt))
+                throw new ArgumentException("Prompt cannot be empty.", nameof(prompt));
+
+            // 构造 multipart/form-data
+            var formData = new System.Collections.Generic.List<IMultipartFormSection>
+            {
+                new MultipartFormDataSection("prompt", prompt),
+                new MultipartFormDataSection("steps", steps.ToString()),
+                new MultipartFormDataSection("guidance_scale",
+                    guidanceScale.ToString("F1", System.Globalization.CultureInfo.InvariantCulture)),
+                new MultipartFormDataSection("tileable", tileable ? "true" : "false"),
+            };
+
+            if (seed.HasValue)
+                formData.Add(new MultipartFormDataSection("seed", seed.Value.ToString()));
+
+            string url = $"{AIGCSettings.ApiBaseUrl}/generate-pbr";
+
+            using (var request = UnityWebRequest.Post(url, formData))
+            {
+                request.timeout = 300; // 5分钟，首次需下载模型 ~2-3GB
+
+                var tcs = new TaskCompletionSource<bool>();
+                var operation = request.SendWebRequest();
+                operation.completed += _ => tcs.SetResult(true);
+                await tcs.Task;
+
+                if (request.result != UnityWebRequest.Result.Success)
+                {
+                    string detail = request.downloadHandler?.text ?? request.error;
+                    throw new AIGCException(
+                        $"PBR 材质生成失败: {request.error}\n" +
+                        $"详细信息: {detail}\n\n" +
+                        $"请确认推理服务已启动。\n" +
+                        $"首次使用 StableMaterials 需要下载模型，请检查服务端日志。"
+                    );
+                }
+
+                byte[] zipData = request.downloadHandler.data;
+                if (zipData == null || zipData.Length < 100)
+                    throw new AIGCException("服务返回了空数据或不完整的 ZIP。");
+
+                // 解压 ZIP
+                var textures = new System.Collections.Generic.Dictionary<string, byte[]>();
+                try
+                {
+                    using (var archive = new System.IO.Compression.ZipArchive(
+                        new System.IO.MemoryStream(zipData),
+                        System.IO.Compression.ZipArchiveMode.Read))
+                    {
+                        foreach (var entry in archive.Entries)
+                        {
+                            if (string.IsNullOrEmpty(entry.Name)) continue;
+
+                            using (var stream = entry.Open())
+                            using (var memStream = new System.IO.MemoryStream())
+                            {
+                                stream.CopyTo(memStream);
+                                textures[entry.Name] = memStream.ToArray();
+                            }
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    throw new AIGCException($"ZIP 解压失败: {ex.Message}\n可能服务返回了错误数据。");
+                }
+
+                if (textures.Count == 0)
+                    throw new AIGCException("ZIP 中未找到任何贴图文件。");
+
+                string filename = request.GetResponseHeader("X-Filename") ?? "pbr_material";
+                string responseSeed = request.GetResponseHeader("X-Seed") ?? seed?.ToString() ?? "??";
+
+                Debug.Log($"[AIGC] PBR 材质生成成功: {textures.Count} 张贴图, seed={responseSeed}");
+                return (textures, filename, responseSeed);
+            }
+        }
+
+        /// <summary>
         /// 检查推理服务是否在线。
         /// </summary>
         /// <returns>true 表示服务就绪</returns>

@@ -17,6 +17,7 @@
 | 里程碑3 | Unity Editor 插件（文生图 + 草图精修双模式、状态检测、一键导入） | ✅ |
 | 里程碑4 | ControlNet 可控生成（Canny 线稿 / Scribble 草图 / Depth 深度） | ✅ |
 | 里程碑5 | TripoSR 图片转 3D 模型（去背景 → 推理 → .glb → Unity Prefab） | ✅ |
+| 里程碑6 | StableMaterials PBR 材质生成（prompt → BaseColor/Normal/Roughness/Metallic → Unity Material） | ✅ |
 
 **已知局限：**
 
@@ -25,6 +26,8 @@
 | TripoSR 边界伪影（方壳） | 三平面表示的立方体边界噪声，尚无有效代码解决方案，后续换底模 |
 | TripoSR 只擅长真实物体 | 训练数据为 Objaverse（真实 3D 扫描），二次元角色会崩 |
 | ControlNet 大图会慢 | SD 1.5 原生 512×512，超过 768 会自动缩放（8GB 显存限制） |
+| PBR 只擅长写实材质 | 训练数据为 MatSynth（真实 PBR），非风格化/动漫材质效果差 |
+| PBR 与 SD 不能同时加载 | 8GB 显存限制，自动卸载/恢复策略透明处理 |
 
 ---
 
@@ -137,6 +140,7 @@ d:\aigc-project\
 | `/generate` | POST | 纯文本生图（prompt → PNG），向后兼容 |
 | `/generate-controlled` | POST | ControlNet 可控生成（参考图 + prompt → 精修图） |
 | `/generate-3d` | POST | TripoSR 图片转 3D 模型（图片 → .glb） |
+| `/generate-pbr` | POST | StableMaterials PBR 材质生成（prompt → ZIP 含 4 张贴图） |
 | `/health` | GET | 服务状态 + 已加载模型信息 |
 | `/docs` | GET | Swagger 可视化文档（可手动测试） |
 
@@ -252,6 +256,61 @@ D:/anaconda3/envs/GPUpytorch-env/python.exe -m uvicorn main:app --host 127.0.0.1
 - **Windows 启动**：用 `python -m uvicorn` 而非裸 `uvicorn`（后者不在 PATH）
 - **print 必须加 flush=True**：否则启动日志被缓冲，用户看不到进度会以为卡了
 - **代码修改需重启服务才能生效**：关掉窗口 → 重新双击 start.bat
+
+---
+
+### PBR 材质生成（StableMaterials）
+
+**模型信息**：
+- 模型 ID：`gvecchio/StableMaterials`，基于 MatFuse 架构（改编自 LDM），独立于 SD 1.5
+- 输出 5 张 512×512 PBR 贴图：BaseColor、Normal、Height、Roughness、Metallic
+- 推理：标准 scheduler 25 步（~15-25 秒），支持 Feature Rolling 无缝纹理
+- **注意**：LCM Scheduler 必须配合 `unet_lcm` 权重使用，直接套用标准 UNet 会崩溃（纯色输出）
+- 权重：~2-3GB（fp16），通过 `trust_remote_code=True` 加载自定义 diffusers pipeline
+- 加载策略：HF 镜像优先 → HF 直连回退，缓存到 `cache/hub/pbr/`
+
+**VRAM 管理**：
+- 8GB 无法同时容纳 SD 1.5 + StableMaterials
+- 策略：PBR 调用时自动将 SD+ControlNet 卸载到 CPU（`_offload_sd_pipeline()`）
+- 推理完成后恢复 SD 到 GPU（`_restore_sd_pipeline()`）
+- 使用 `threading.Lock` 防止并发访问冲突
+- **注意**：fp16 pipeline 移到 CPU 会有警告（可忽略，只用于释放显存，不在 CPU 上推理）
+
+**纹理打包**（服务端 PIL/numpy）：
+- `metallic_smoothness.png`：R 通道 = Metallic，A 通道 = Smoothness（1 - Roughness）
+- 此为 Unity Standard Shader `_MetallicGlossMap` 的预期格式
+- ZIP 中额外附带原始 `roughness_raw.png` 和 `metallic_raw.png` 供调试
+
+**API 参数**（`POST /generate-pbr`）：
+
+| 参数 | 默认值 | 说明 |
+|------|--------|------|
+| `prompt` | 必填 | 材质描述（英文） |
+| `tileable` | `true` | 无缝平铺（Feature Rolling） |
+| `steps` | 25 | 推理步数（5-50） |
+| `guidance_scale` | 10.0 | 引导强度 |
+
+**Triplanar Shader（`AIGC/TriplanarPBR`）**：
+- 世界坐标三平面纹理投射，**完全无视模型 UV**
+- AI 生成的 3D 模型（TripoSR 等）UV 坐标差/无 UV 直接可用
+- 从 X/Y/Z 三个轴投射纹理，根据表面法线加权混合
+- 支持 BaseColor / Normal / MetallicSmoothness（与 StableMaterials 输出对应）
+- 关键实现细节：
+  - 用 `INTERNAL_DATA` + `WorldNormalVector()` 获取 TBN 矩阵（不能用自定义 vert，会破坏 TBN 传递）
+  - Triplanar 法线必须从世界空间转回**切线空间**再赋值 `o.Normal`（否则光照全黑）
+  - 法线混合时用顶点法线的符号修正投影方向
+
+**Unity 集成**：
+- `AssetImporter.SaveAsPBRMaterial()` 为每种贴图类型配置正确的 TextureImporter
+- BaseColor → sRGB Default；Normal → sRGB Off NormalMap；MetallicSmoothness → sRGB Off
+- **默认使用 `AIGC/TriplanarPBR` shader**（而非 Standard），确保所有模型都正常显示
+- 回退：Triplanar shader 未找到时自动回退到 Standard
+
+**已知局限**：
+- 只擅长写实材质（训练数据 MatSynth ~6,198 种 PBR），非风格化
+- 复杂空间关系/图案精度有限
+- 独立架构不与现有 SD/LoRA 共享组件
+- Triplanar 法线混合在极端锐角处可能有轻微不连续
 
 ---
 

@@ -1,5 +1,6 @@
 using System;
 using System.IO;
+using System.Collections.Generic;
 using UnityEditor;
 using UnityEngine;
 
@@ -119,6 +120,218 @@ namespace AIGCAssetGenerator
             EditorGUIUtility.PingObject(AssetDatabase.LoadAssetAtPath<GameObject>(prefabPath));
 
             return prefabPath;
+        }
+
+        /// <summary>
+        /// 将 PBR 纹理贴图保存为 Unity Standard Shader Material。
+        ///
+        /// 纹理映射:
+        ///   - basecolor.png         → _MainTex (sRGB)
+        ///   - normal.png            → _BumpMap (Normal Map import)
+        ///   - metallic_smoothness.png → _MetallicGlossMap (R=Metallic, A=Smoothness)
+        ///   - height.png            → _ParallaxMap (可选)
+        /// </summary>
+        /// <param name="textures">贴图名称→字节数据的字典</param>
+        /// <param name="materialName">材质名称（不含扩展名）</param>
+        /// <returns>Material 资产路径</returns>
+        public static string SaveAsPBRMaterial(
+            Dictionary<string, byte[]> textures,
+            string materialName)
+        {
+            if (textures == null || textures.Count == 0)
+                throw new ArgumentNullException(nameof(textures));
+
+            if (string.IsNullOrWhiteSpace(materialName))
+                materialName = "pbr_material";
+
+            materialName = SanitizeFileName(materialName);
+
+            // 1. 确保输出目录存在
+            string fullOutputDir = Path.Combine(Application.dataPath, "GeneratedAssets");
+            if (!Directory.Exists(fullOutputDir))
+                Directory.CreateDirectory(fullOutputDir);
+
+            // 2. 保存各纹理为 PNG 资产
+            var savedTexturePaths = new Dictionary<string, string>();
+
+            foreach (var kvp in textures)
+            {
+                string mapType = Path.GetFileNameWithoutExtension(kvp.Key); // "basecolor", "normal", etc.
+                byte[] data = kvp.Value;
+
+                if (data == null || data.Length == 0) continue;
+
+                // 跳过存档调试用的贴图，不导入 Material
+                if (mapType == "roughness_raw" || mapType == "metallic_raw" || mapType == "preview")
+                    continue;
+
+                string textureName = $"{materialName}_{mapType}";
+                string assetPath = $"{OUTPUT_DIRECTORY}/{textureName}.png";
+
+                // 处理重名
+                string uniquePath = GetUniqueAssetPath(textureName, ".png");
+
+                string fullPath = Path.Combine(Application.dataPath, "GeneratedAssets",
+                    Path.GetFileName(uniquePath));
+                File.WriteAllBytes(fullPath, data);
+
+                savedTexturePaths[mapType] = uniquePath;
+                Debug.Log($"[AIGC] PBR 贴图已写入: {fullPath} ({data.Length / 1024} KB)");
+            }
+
+            // 3. 刷新 AssetDatabase 使新贴图可见
+            AssetDatabase.Refresh();
+
+            // 4. 配置纹理导入参数
+            foreach (var kvp in savedTexturePaths)
+            {
+                ConfigurePBRTextureImporter(kvp.Value, kvp.Key);
+            }
+
+            // 5. 创建 Material
+            string materialPath = CreatePBRMaterialAsset(materialName, savedTexturePaths);
+
+            Debug.Log($"[AIGC] PBR 材质已导入: {materialPath}");
+
+            // 6. 在 Project 窗口中高亮 Material
+            EditorGUIUtility.PingObject(AssetDatabase.LoadAssetAtPath<Material>(materialPath));
+
+            return materialPath;
+        }
+
+        /// <summary>
+        /// 配置 PBR 贴图的导入参数。
+        /// 不同贴图类型需要不同的 sRGB/NormalMap/wrapMode 设置。
+        /// </summary>
+        private static void ConfigurePBRTextureImporter(string assetPath, string mapType)
+        {
+            TextureImporter importer = UnityEditor.AssetImporter.GetAtPath(assetPath) as TextureImporter;
+            if (importer == null) return;
+
+            bool changed = false;
+
+            switch (mapType)
+            {
+                case "basecolor":
+                    // 颜色贴图: sRGB=On, Default type, Repeat wrap
+                    if (!importer.sRGBTexture) { importer.sRGBTexture = true; changed = true; }
+                    if (importer.textureType != TextureImporterType.Default)
+                        { importer.textureType = TextureImporterType.Default; changed = true; }
+                    if (importer.wrapMode != TextureWrapMode.Repeat)
+                        { importer.wrapMode = TextureWrapMode.Repeat; changed = true; }
+                    break;
+
+                case "normal":
+                    // 法线贴图: NormalMap type, sRGB=Off, Repeat wrap
+                    if (importer.textureType != TextureImporterType.NormalMap)
+                        { importer.textureType = TextureImporterType.NormalMap; changed = true; }
+                    if (importer.sRGBTexture) { importer.sRGBTexture = false; changed = true; }
+                    if (importer.wrapMode != TextureWrapMode.Repeat)
+                        { importer.wrapMode = TextureWrapMode.Repeat; changed = true; }
+                    break;
+
+                case "metallic_smoothness":
+                    // Metallic/Smoothness packed: sRGB=Off, Default type, Repeat wrap
+                    if (importer.sRGBTexture) { importer.sRGBTexture = false; changed = true; }
+                    if (importer.textureType != TextureImporterType.Default)
+                        { importer.textureType = TextureImporterType.Default; changed = true; }
+                    if (importer.wrapMode != TextureWrapMode.Repeat)
+                        { importer.wrapMode = TextureWrapMode.Repeat; changed = true; }
+                    break;
+
+                case "height":
+                    // 高度贴图: sRGB=Off, Default, Repeat wrap
+                    if (importer.sRGBTexture) { importer.sRGBTexture = false; changed = true; }
+                    if (importer.wrapMode != TextureWrapMode.Repeat)
+                        { importer.wrapMode = TextureWrapMode.Repeat; changed = true; }
+                    break;
+            }
+
+            // 禁用 Non-Power-of-2 缩放（512×512 已是 POT）
+            if (importer.npotScale != TextureImporterNPOTScale.None)
+                { importer.npotScale = TextureImporterNPOTScale.None; changed = true; }
+
+            if (changed)
+            {
+                importer.SaveAndReimport();
+                Debug.Log($"[AIGC] PBR TextureImporter 已配置: {mapType}");
+            }
+        }
+
+        /// <summary>
+        /// 创建 Standard Shader Material 并赋值 PBR 贴图。
+        ///
+        /// Standard Shader 的 PBR 属性:
+        ///   _MainTex          = Albedo (Base Color)
+        ///   _BumpMap          = Normal Map
+        ///   _MetallicGlossMap = R=Metallic, A=Smoothness (Gloss)
+        ///   _ParallaxMap      = Height/Displacement
+        /// </summary>
+        private static string CreatePBRMaterialAsset(
+            string materialName,
+            Dictionary<string, string> texturePaths)
+        {
+            // 生成唯一 Material 路径
+            string materialPath = GetUniqueAssetPath(materialName, ".mat");
+
+            // 创建 Triplanar PBR Material（无视 UV，AI 模型直接可用）
+            Shader triplanarShader = Shader.Find("AIGC/TriplanarPBR");
+            if (triplanarShader == null)
+            {
+                Debug.LogWarning("[AIGC] TriplanarPBR shader 未找到，回退到 Standard。"
+                    + "请将 TriplanarPBR.shader 放入项目中。");
+                triplanarShader = Shader.Find("Standard");
+            }
+            Material mat = new Material(triplanarShader);
+
+            // 赋值纹理
+            if (texturePaths.TryGetValue("basecolor", out string basecolorPath))
+            {
+                Texture2D basecolor = AssetDatabase.LoadAssetAtPath<Texture2D>(basecolorPath);
+                if (basecolor != null)
+                {
+                    mat.SetTexture("_MainTex", basecolor);
+                    mat.mainTexture = basecolor;
+                }
+            }
+
+            if (texturePaths.TryGetValue("normal", out string normalPath))
+            {
+                Texture2D normal = AssetDatabase.LoadAssetAtPath<Texture2D>(normalPath);
+                if (normal != null)
+                {
+                    mat.SetTexture("_BumpMap", normal);
+                    mat.EnableKeyword("_NORMALMAP");
+                }
+            }
+
+            if (texturePaths.TryGetValue("metallic_smoothness", out string metallicPath))
+            {
+                Texture2D metallic = AssetDatabase.LoadAssetAtPath<Texture2D>(metallicPath);
+                if (metallic != null)
+                {
+                    mat.SetTexture("_MetallicGlossMap", metallic);
+                    mat.EnableKeyword("_METALLICGLOSSMAP");
+                }
+            }
+
+            if (texturePaths.TryGetValue("height", out string heightPath))
+            {
+                Texture2D height = AssetDatabase.LoadAssetAtPath<Texture2D>(heightPath);
+                if (height != null)
+                {
+                    mat.SetTexture("_ParallaxMap", height);
+                    mat.EnableKeyword("_PARALLAXMAP");
+                }
+            }
+
+            // 创建 .mat 资产文件
+            AssetDatabase.CreateAsset(mat, materialPath);
+            AssetDatabase.SaveAssets();
+            AssetDatabase.Refresh();
+
+            Debug.Log($"[AIGC] Standard Material 已创建: {materialPath}");
+            return materialPath;
         }
 
         /// <summary>

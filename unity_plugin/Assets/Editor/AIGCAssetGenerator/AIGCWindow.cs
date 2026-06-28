@@ -26,8 +26,8 @@ namespace AIGCAssetGenerator
         private static readonly string[] AssetTypeNames = { "图标", "贴图", "UI元素" };
 
         // 生成模式
-        private int _generationMode = 0; // 0=文生图, 1=草图精修, 2=3D模型生成
-        private static readonly string[] GenerationModeNames = { "文生图", "草图精修", "3D模型生成" };
+        private int _generationMode = 0; // 0=文生图, 1=草图精修, 2=3D模型生成, 3=PBR材质
+        private static readonly string[] GenerationModeNames = { "文生图", "草图精修", "3D模型生成", "PBR材质" };
 
         // ControlNet 参数
         private int _controlModeIndex = 0; // 0=Canny, 1=Scribble
@@ -43,6 +43,11 @@ namespace AIGCAssetGenerator
         private string _generatedModelFormat = "glb";
         private int _generatedModelVertices = 0;
         private int _generatedModelFaces = 0;
+
+        // PBR 材质生成参数
+        private bool _pbrTileable = true;
+        private System.Collections.Generic.Dictionary<string, byte[]> _generatedPBRTextures = null;
+        private string _generatedPBRFilename = "";
 
         // 高级选项
         private bool _showAdvanced = false;
@@ -127,13 +132,32 @@ namespace AIGCAssetGenerator
                 DrawModelFormatSelector();
                 EditorGUILayout.Space(5);
             }
+            else if (_generationMode == 3)
+            {
+                // PBR 材质模式：只需 prompt，不需要图片
+                EditorGUILayout.HelpBox(
+                    "输入英文描述，AI 自动生成 5 张 PBR 贴图。\n" +
+                    "例如: \"rough stone wall\", \"wooden floor planks\", \"rusted metal panel\"",
+                    MessageType.Info
+                );
+            }
 
-            // 3D 模式：不需要 prompt + 资产类型
-            if (_generationMode != 2)
+            // 3D 模式 / PBR 模式：不需要 asset type
+            if (_generationMode != 2 && _generationMode != 3)
             {
                 DrawPromptField();
                 EditorGUILayout.Space(5);
                 DrawAssetTypeSelector();
+                EditorGUILayout.Space(5);
+                DrawAdvancedOptions();
+                EditorGUILayout.Space(10);
+            }
+            else if (_generationMode == 3)
+            {
+                // PBR 模式：有 prompt 有高级选项，但没有 asset type
+                DrawPromptField();
+                EditorGUILayout.Space(5);
+                DrawPBROptions();
                 EditorGUILayout.Space(5);
                 DrawAdvancedOptions();
                 EditorGUILayout.Space(10);
@@ -354,6 +378,17 @@ namespace AIGCAssetGenerator
             EditorGUI.indentLevel--;
         }
 
+        private void DrawPBROptions()
+        {
+            EditorGUILayout.LabelField("PBR 材质选项", EditorStyles.boldLabel);
+
+            _pbrTileable = EditorGUILayout.Toggle("无缝贴图 (Tileable)", _pbrTileable);
+            EditorGUILayout.LabelField(
+                "  开启后纹理可无缝平铺，适合地面/墙壁等重复纹理。",
+                EditorStyles.miniLabel
+            );
+        }
+
         private void DrawAdvancedOptions()
         {
             _showAdvanced = EditorGUILayout.Foldout(_showAdvanced, "高级选项");
@@ -395,7 +430,7 @@ namespace AIGCAssetGenerator
 
         private void DrawGenerateButton()
         {
-            // 3D 模式不需要 prompt，但需要参考图
+            // 3D 模式需要参考图，其他模式需要 prompt
             bool canGenerate = !_isGenerating && (
                 _generationMode == 2
                     ? _referenceTexture != null
@@ -404,7 +439,9 @@ namespace AIGCAssetGenerator
             GUI.enabled = canGenerate;
 
             string buttonText = _isGenerating ? "生成中..." :
-                _generationMode == 2 ? "生成 3D 模型 (Generate 3D)" : "生成 (Generate)";
+                _generationMode == 2 ? "生成 3D 模型 (Generate 3D)" :
+                _generationMode == 3 ? "生成 PBR 材质 (Generate PBR)" :
+                "生成 (Generate)";
 
             if (GUILayout.Button(buttonText, GUILayout.Height(40)))
             {
@@ -449,6 +486,26 @@ namespace AIGCAssetGenerator
                 return;
             }
 
+            // PBR 模式：显示贴图信息
+            if (_generationMode == 3 && _generatedPBRTextures != null)
+            {
+                var mapNames = new System.Text.StringBuilder();
+                foreach (var kvp in _generatedPBRTextures)
+                {
+                    string name = System.IO.Path.GetFileNameWithoutExtension(kvp.Key);
+                    mapNames.AppendLine($"  - {name} ({kvp.Value.Length / 1024} KB)");
+                }
+
+                EditorGUILayout.HelpBox(
+                    $"PBR 材质已生成！\n" +
+                    $"包含 {_generatedPBRTextures.Count} 张贴图:\n" +
+                    mapNames.ToString() + "\n" +
+                    $"点击「导入到项目」创建 Standard Shader Material。",
+                    MessageType.Info
+                );
+                return;
+            }
+
             if (_generatedTexture != null)
             {
                 // 计算预览尺寸（保持宽高比，最大 256 像素宽）
@@ -480,16 +537,22 @@ namespace AIGCAssetGenerator
 
         private void DrawImportButton()
         {
-            bool hasResult = _generationMode == 2
-                ? _generatedModelBytes != null
-                : _generatedTexture != null;
+            bool hasResult = _generationMode switch
+            {
+                2 => _generatedModelBytes != null,
+                3 => _generatedPBRTextures != null,
+                _ => _generatedTexture != null,
+            };
             GUI.enabled = (hasResult && !_isGenerating);
 
             GUILayout.BeginHorizontal();
 
-            string importLabel = _generationMode == 2
-                ? "导入 3D 模型到项目"
-                : "导入到项目 (Import to Project)";
+            string importLabel = _generationMode switch
+            {
+                2 => "导入 3D 模型到项目",
+                3 => "导入 PBR 材质到项目",
+                _ => "导入到项目 (Import to Project)",
+            };
 
             if (GUILayout.Button(importLabel, GUILayout.Height(35)))
             {
@@ -513,7 +576,7 @@ namespace AIGCAssetGenerator
         /// </summary>
         private async Task DoGenerate()
         {
-            // 文生图/草图精修模式需要 prompt；3D 模式不需要
+            // 文生图/草图精修/PBR 模式需要 prompt；仅 3D 模式不需要
             if (_generationMode != 2 && string.IsNullOrWhiteSpace(_prompt))
             {
                 SetStatus("请输入画面描述 (Prompt)。", MessageType.Warning);
@@ -543,6 +606,7 @@ namespace AIGCAssetGenerator
             _isGenerating = true;
             _generatedTexture = null;
             _generatedModelBytes = null;
+            _generatedPBRTextures = null;
             _lastGeneratedSeed = "";
 
             string waitMsg = _generationMode switch
@@ -550,6 +614,7 @@ namespace AIGCAssetGenerator
                 0 => "正在生成图片，请耐心等待（通常 5~20 秒）...",
                 1 => "ControlNet 生成中，首次需下载模型（约 1.4GB），请耐心等待...",
                 2 => "TripoSR 3D 模型生成中，首次需下载模型（约 1.68GB），请耐心等待...",
+                3 => "StableMaterials PBR 材质生成中，首次需下载模型（约 2-3GB），请耐心等待...",
                 _ => "生成中..."
             };
             SetStatus(waitMsg, MessageType.Info);
@@ -593,6 +658,26 @@ namespace AIGCAssetGenerator
                     _lastGeneratedSeed = seed?.ToString() ?? "随机";
                     SetStatus(
                         $"生成成功！图片尺寸: {_generatedTexture.width}×{_generatedTexture.height}",
+                        MessageType.Info
+                    );
+                }
+                else if (_generationMode == 3)
+                {
+                    // PBR 材质生成
+                    var (textures, filename, responseSeed) = await AIGCClient.GeneratePBR(
+                        prompt: _prompt.Trim(),
+                        steps: _steps,
+                        guidanceScale: _guidanceScale,
+                        tileable: _pbrTileable,
+                        seed: seed
+                    );
+
+                    _generatedPBRTextures = textures;
+                    _generatedPBRFilename = filename;
+                    _lastGeneratedSeed = responseSeed;
+
+                    SetStatus(
+                        $"PBR 材质生成成功！共 {textures.Count} 张贴图（seed={responseSeed}）。",
                         MessageType.Info
                     );
                 }
@@ -678,6 +763,43 @@ namespace AIGCAssetGenerator
                 {
                     SetStatus($"3D 模型导入失败: {ex.Message}", MessageType.Error);
                     Debug.LogError($"[AIGC] 3D 导入失败: {ex}");
+                }
+
+                return;
+            }
+
+            if (_generationMode == 3)
+            {
+                // PBR 材质导入
+                if (_generatedPBRTextures == null || _generatedPBRTextures.Count == 0)
+                {
+                    SetStatus("没有可导入的 PBR 材质，请先生成。", MessageType.Warning);
+                    return;
+                }
+
+                try
+                {
+                    string baseName = GenerateAssetName(
+                        string.IsNullOrWhiteSpace(_prompt) ? "pbr_material" : _prompt
+                    );
+
+                    string materialPath = AssetImporter.SaveAsPBRMaterial(
+                        _generatedPBRTextures, baseName
+                    );
+
+                    SetStatus(
+                        $"PBR 材质导入成功！\n" +
+                        $"Material 路径: {materialPath}\n" +
+                        $"可直接拖到 3D 模型上使用。",
+                        MessageType.Info
+                    );
+
+                    Debug.Log($"[AIGC] PBR 材质导入完成: {materialPath}");
+                }
+                catch (Exception ex)
+                {
+                    SetStatus($"PBR 材质导入失败: {ex.Message}", MessageType.Error);
+                    Debug.LogError($"[AIGC] PBR 导入失败: {ex}");
                 }
 
                 return;

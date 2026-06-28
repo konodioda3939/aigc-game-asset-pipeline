@@ -12,12 +12,14 @@ os.environ['HF_ENDPOINT'] = 'https://hf-mirror.com'
 os.environ['HF_HUB_DOWNLOAD_TIMEOUT'] = '600'
 
 import torch
+import threading
 from pathlib import Path
 from diffusers import (
     StableDiffusionPipeline,
     StableDiffusionControlNetPipeline,
     ControlNetModel,
     DPMSolverMultistepScheduler,
+    LCMScheduler,
 )
 from peft import PeftModel
 
@@ -67,6 +69,9 @@ _controlnet_models = {}     # mode → ControlNetModel
 _controlnet_pipelines = {}  # mode → StableDiffusionControlNetPipeline
 
 _triposr_model = None       # TripoSR TSR 模型实例（全局单例）
+
+_pbr_pipeline = None       # StableMaterials PBR 管线（全局单例）
+_pbr_lock = threading.Lock()  # PBR 管线互斥锁（防止并发卸载冲突）
 
 
 # ===== 设备检测 =====
@@ -432,6 +437,10 @@ TRIPOSR_MODEL_ID = "stabilityai/TripoSR"
 TRIPOSR_CONFIG = "config.yaml"
 TRIPOSR_WEIGHTS = "model.ckpt"
 
+# ===== StableMaterials PBR 材质生成 =====
+PBR_MODEL_ID = "gvecchio/StableMaterials"
+PBR_CACHE_DIR = CACHE_DIR / "pbr" / "StableMaterials"
+
 
 def load_triposr_model():
     """
@@ -577,3 +586,168 @@ def _remap_triposr_keys(state_dict: dict) -> dict:
 def get_triposr_model():
     """获取 TripoSR 模型实例（首次调用自动下载+加载）。"""
     return load_triposr_model()
+
+
+# ====== VRAM 管理（SD 管线卸载/恢复，为 PBR 腾出显存） =====
+
+def _offload_sd_pipeline():
+    """
+    将 SD 1.5 + ControlNet 管线卸载到 CPU，释放显存给 StableMaterials。
+
+    StableMaterials 是独立架构，不与 SD 1.5 共享组件。
+    8GB 显存无法同时容纳两个管线。
+    """
+    global _pipeline, _controlnet_models, _controlnet_pipelines
+
+    offloaded_anything = False
+
+    if _pipeline is not None and str(_pipeline.device) != "cpu":
+        print("[model_loader] 将 SD 管线转移到 CPU（为 StableMaterials 腾出显存）...", flush=True)
+        _pipeline.to("cpu")
+        offloaded_anything = True
+
+    # ControlNet 管线也卸载
+    for pipe in _controlnet_pipelines.values():
+        if pipe is not None and str(pipe.device) != "cpu":
+            pipe.to("cpu")
+            offloaded_anything = True
+
+    for model in _controlnet_models.values():
+        if model is not None and str(model.device) != "cpu":
+            model.to("cpu")
+            offloaded_anything = True
+
+    if offloaded_anything:
+        torch.cuda.synchronize()
+        torch.cuda.empty_cache()
+        print("[model_loader] SD 管线已卸载到 CPU，显存已释放。", flush=True)
+
+
+def _restore_sd_pipeline():
+    """
+    将 SD 1.5 + ControlNet 管线恢复到 GPU。
+
+    在 PBR 生成完成后调用，恢复常规文生图/ControlNet 功能。
+    """
+    global _pipeline, _controlnet_models, _controlnet_pipelines
+
+    device, _ = _detect_device()
+    if device != "cuda":
+        return  # 没有 GPU，无需恢复
+
+    restored_anything = False
+
+    if _pipeline is not None and str(_pipeline.device) != "cuda":
+        print("[model_loader] 恢复 SD 管线到 GPU...", flush=True)
+        _pipeline.to("cuda")
+        restored_anything = True
+
+    for mode in list(_controlnet_models.keys()):
+        model = _controlnet_models.get(mode)
+        if model is not None and str(model.device) != "cuda":
+            model.to("cuda")
+            restored_anything = True
+
+    for pipe in _controlnet_pipelines.values():
+        if pipe is not None and str(pipe.device) != "cuda":
+            pipe.to("cuda")
+            restored_anything = True
+
+    if restored_anything:
+        print("[model_loader] SD 管线已恢复到 GPU。", flush=True)
+
+
+# ====== StableMaterials PBR 管线 ======
+
+def load_pbr_pipeline():
+    """
+    加载 StableMaterials PBR 管线（懒加载，首次调用时下载 ~2-3GB 权重）。
+
+    StableMaterials 是专用的 PBR 材质生成管线，使用 MatFuse 架构
+    （改编自 LDM），不依赖 SD 1.5。支持 LCM 4 步快速推理。
+
+    返回：
+        StableMaterialsPipeline 实例（已在 GPU 上）
+    """
+    global _pbr_pipeline
+
+    if _pbr_pipeline is not None:
+        print("[model_loader] PBR 管线已加载，复用现有实例。", flush=True)
+        return _pbr_pipeline
+
+    device, dtype = _detect_device()
+
+    # --- 卸载 SD 管线到 CPU，为 StableMaterials 腾出显存 ---
+    _offload_sd_pipeline()
+
+    # --- 多策略下载，带重试和断点续传（同 TripoSR 模式）---
+    print(f"[model_loader] 正在加载 StableMaterials PBR 管线: {PBR_MODEL_ID} ...", flush=True)
+    print(f"[model_loader] 模型权重 ~2-3GB，首次下载请耐心等待...", flush=True)
+
+    saved_endpoint = os.environ.get("HF_ENDPOINT")
+    pipe = None
+
+    for strategy_name, use_mirror in [("HuggingFace 镜像", True), ("HuggingFace 直连", False)]:
+        try:
+            if not use_mirror and saved_endpoint:
+                os.environ.pop("HF_ENDPOINT", None)
+                print("[model_loader] 切换为直连 huggingface.co ...", flush=True)
+            elif use_mirror and saved_endpoint:
+                os.environ["HF_ENDPOINT"] = saved_endpoint
+
+            from diffusers import DiffusionPipeline
+
+            pipe = DiffusionPipeline.from_pretrained(
+                PBR_MODEL_ID,
+                torch_dtype=dtype,
+                trust_remote_code=True,
+                cache_dir=str(CACHE_DIR),
+            )
+            # 使用模型默认 scheduler（标准 25-30 步推理，质量最佳）
+            # 注意：LCM scheduler 需要配合 unet_lcm 权重使用，当前用标准 UNet
+            print(f"[model_loader] 使用模型默认 scheduler（标准推理模式）。", flush=True)
+
+            print(f"[model_loader] StableMaterials 加载成功（{strategy_name}）。", flush=True)
+            break
+        except Exception as e:
+            print(f"[model_loader] {strategy_name} 下载失败: {e}", flush=True)
+            pipe = None
+            if strategy_name == "HuggingFace 直连":
+                if saved_endpoint:
+                    os.environ["HF_ENDPOINT"] = saved_endpoint
+                raise RuntimeError(
+                    f"\n{'='*60}\n"
+                    f"  StableMaterials 模型下载失败（所有策略均失败）\n"
+                    f"{'='*60}\n"
+                    f"\n"
+                    f"  已尝试：\n"
+                    f"    1. HuggingFace 镜像 (hf-mirror.com)\n"
+                    f"    2. HuggingFace 直连 (huggingface.co)\n"
+                    f"\n"
+                    f"  手动解决方案：\n"
+                    f"    方式 A（推荐）：换个网络好的时段，重启服务自动重试\n"
+                    f"    方式 B：手动下载\n"
+                    f"      → 浏览器打开 https://huggingface.co/{PBR_MODEL_ID}\n"
+                    f"      → 下载所有文件\n"
+                    f"      → 放入 {PBR_CACHE_DIR}\n"
+                    f"      → 重启服务即可\n"
+                    f"{'='*60}\n"
+                )
+
+    # 恢复环境变量
+    if saved_endpoint:
+        os.environ["HF_ENDPOINT"] = saved_endpoint
+
+    # --- 移到 GPU + 优化 ---
+    pipe = pipe.to(device)
+    pipe.enable_attention_slicing()
+
+    _pbr_pipeline = pipe
+    print(f"[model_loader] StableMaterials PBR 管线就绪（设备: {device}）。", flush=True)
+    return pipe
+
+
+def get_pbr_pipeline():
+    """获取 StableMaterials PBR 管线实例（首次调用自动下载+加载，线程安全）。"""
+    with _pbr_lock:
+        return load_pbr_pipeline()

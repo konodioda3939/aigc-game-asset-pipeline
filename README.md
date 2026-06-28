@@ -13,17 +13,17 @@
 
 ## 📖 这是什么？
 
-一个**从文字/草图到游戏资产**的 AI 管线，分五个阶段：
+一个**从文字/草图到游戏资产**的 AI 管线，分六个阶段：
 
 ```
-┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────┐
-│ 阶段 1    │─→│ 阶段 2    │─→│ 阶段 3    │─→│ 阶段 4    │─→│ 阶段 5    │
-│ LoRA 微调 │  │ Python   │  │ Unity    │  │ ControlNet│  │ TripoSR   │
-│          │  │ API      │  │ 插件      │  │ 可控生成   │  │ 图片→3D   │
-│ 48张原神图│  │ FastAPI  │  │ 输入文字  │  │ 草图/线稿  │  │ 上传图片  │
-│ →训练LoRA│  │ →PNG图片 │  │ →生成图片 │  │ →AI精修   │  │ →3D模型  │
-│ →原神风格│  │          │  │ →导入资产 │  │ →保持结构  │  │ →Unity    │
-└──────────┘  └──────────┘  └──────────┘  └──────────┘  └──────────┘
+┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────┐
+│ 阶段 1    │─→│ 阶段 2    │─→│ 阶段 3    │─→│ 阶段 4    │─→│ 阶段 5    │─→│ 阶段 6    │
+│ LoRA 微调 │  │ Python   │  │ Unity    │  │ ControlNet│  │ TripoSR   │  │ PBR 材质  │
+│          │  │ API      │  │ 插件      │  │ 可控生成   │  │ 图片→3D   │  │ 自动生成   │
+│ 48张原神图│  │ FastAPI  │  │ 输入文字  │  │ 草图/线稿  │  │ 上传图片  │  │ 输入描述   │
+│ →训练LoRA│  │ →PNG图片 │  │ →生成图片 │  │ →AI精修   │  │ →3D模型  │  │ →完整材质  │
+│ →原神风格│  │          │  │ →导入资产 │  │ →保持结构  │  │ →Unity    │  │ →Unity.mat│
+└──────────┘  └──────────┘  └──────────┘  └──────────┘  └──────────┘  └──────────┘
 ```
 
 ---
@@ -173,6 +173,7 @@ adapter_model.safetensors (12.2 MB)
 | `/generate` | POST | 传入 prompt，返回 PNG 图片（纯文本生图） |
 | `/generate-controlled` | POST | 上传参考图 + prompt，AI 保持结构精修（详见阶段 4） |
 | `/generate-3d` | POST | 上传图片 → AI 生成 3D 模型（详见阶段 5） |
+| `/generate-pbr` | POST | 输入材质描述 → AI 生成 4 张 PBR 贴图 ZIP（详见阶段 6） |
 | `/health` | GET | 服务状态检测 |
 | `/docs` | GET | Swagger 可视化文档（可手动测试） |
 
@@ -360,6 +361,69 @@ Unity：写入 Assets/ → ModelImporter → 自动创建 Prefab → Ping 到 Pr
 
 ---
 
+### 阶段 6：PBR 材质自动生成
+
+**目标**：输入文字描述（如 "rough stone wall"），AI 自动生成完整的 PBR 材质贴图集，一键创建 Unity Standard Shader Material。
+
+**技术选型**：StableMaterials（`gvecchio/StableMaterials`）—— 专用 PBR 材质生成管线，基于 MatFuse 架构。
+
+**流程**：
+
+```text
+用户输入材质描述 (prompt)
+       ↓
+SD 管线卸载到 CPU（腾显存）
+       ↓
+StableMaterials LCM 推理（4 步，~5-10 秒）
+       ↓
+生成 5 张 PBR 贴图（BaseColor / Normal / Height / Roughness / Metallic）
+       ↓
+服务端打包：Metallic(R) + Smoothness(1-Roughness, A) → Unity _MetallicGlossMap
+       ↓
+所有贴图 ZIP → 返回
+       ↓
+Unity：解压 → 导入贴图 → 配置 TextureImporter → 创建 Triplanar .mat
+```
+
+**API 参数**（`POST /generate-pbr`）：
+
+| 参数 | 默认值 | 说明 |
+|------|--------|------|
+| `prompt` | 必填 | 材质描述（英文），如 `"rough stone wall"` |
+| `tileable` | `true` | 无缝平铺（Feature Rolling） |
+| `steps` | 25 | 推理步数（5~50） |
+| `guidance_scale` | 10.0 | 引导强度（1~20） |
+| `seed` | 随机 | 固定种子可复现 |
+
+**返回**：`application/zip`，含 `basecolor.png`、`normal.png`、`metallic_smoothness.png`（R=金属度 A=光滑度）、`height.png`。
+
+**Triplanar Shader**（`AIGC/TriplanarPBR`）：
+
+PBR 材质默认使用 Triplanar（三平面）纹理投射，**无视模型的 UV 坐标**，从 X/Y/Z 三个世界方向投射纹理并根据法线自动混合。这意味着 **TripoSR 等 AI 生成的模型（UV 差/无 UV）直接丢上去就能正常显示材质**，不会因 UV 丢失而变成纯色。
+
+可在 Material Inspector 的 Shader 下拉菜单中随时切换回 `Standard`。
+
+**设计亮点**：
+
+- StableMaterials 是独立架构（不依赖 SD 1.5），懒加载
+- 标准 scheduler 25 步推理，512×512 输出（LCM scheduler 需配合专用 unet_lcm 权重，标准 UNet 直接用会输出纯色）
+- Feature Rolling 生成无缝纹理（游戏地面/墙壁必备）
+- 服务端用 PIL 将 Metallic + Smoothness 打包为 Unity Standard Shader 兼容的 RGBA 格式
+- SD 管线与 PBR 管线自动卸载/恢复，8GB 显存安全共存
+- 下载策略同 ControlNet/TripoSR：HF 镜像优先 → 直连回退
+- Triplanar Shader 解决 AI 模型 UV 缺失问题，Cube 和复杂模型均正常显示
+
+**当前局限**：
+
+| 局限 | 说明 |
+|------|------|
+| 模型为独立架构 | 不与现有 SD/LoRA 共享组件，首次下载 ~2-3GB |
+| 只擅长写实材质 | 训练数据为真实 PBR 材质（MatSynth），非风格化 |
+| 复杂空间关系可能不准 | 对复杂图案细节的精度有限 |
+| 单次生成一张材质 | 不支持批量（需多次调用） |
+
+---
+
 ## 🛠️ 技术栈
 
 > 顶部 badges 为快速概览，下表补充各技术在管线中的具体角色：
@@ -370,6 +434,7 @@ Unity：写入 Assets/ → ModelImporter → 自动创建 Prefab → Ping 到 Pr
 | 基座模型 | Counterfeit-V2.5 + LoRA（PEFT, rank=16） | 动漫风格图像生成 |
 | 可控生成 | ControlNet（Canny / Scribble / Depth） | 草图/线稿 → AI 精修，保持结构 |
 | 3D 重建 | TripoSR（Stability AI） | 单图 → 带贴图 3D mesh（.glb） |
+| PBR 材质 | StableMaterials（MatFuse + LCM） | prompt → 完整 PBR 贴图集（.mat） |
 | 自动标注 | WD SwinV2 Tagger v3（ONNX Runtime） | 训练数据自动打标 |
 | 推理服务 | FastAPI + Uvicorn | 本地 HTTP API（`/generate` 等接口） |
 | 游戏引擎 | Unity 2022.3 LTS | Editor 插件 + 资产一键导入 |
@@ -380,8 +445,8 @@ Unity：写入 Assets/ → ModelImporter → 自动创建 Prefab → Ping 到 Pr
 ## 🎯 下一步
 
 - [x] ~~图片转 3D 模型~~ ✅ 管线已打通（TripoSR），需升级底模改善质量
+- [x] ~~PBR 材质批量生成~~ ✅ 管线已打通（StableMaterials），prompt → 完整材质球
 - [ ] 升级 3D 底模（TRELLIS / Unique3D，改善角色和背面质量）
-- [ ] PBR 材质批量生成（游戏生产中实际表现）
 - [ ] 训练自己的 ControlNet（用游戏素材风格）
 - [ ] 批量生成 + 多种子变体（一次生成多张，挑最好的）
 - [ ] 训练更多风格 LoRA（科幻、像素、卡通）

@@ -1,14 +1,16 @@
 """
-FastAPI 推理服务：接收文字 prompt + 可选参考图（ControlNet），返回 AI 生成的图片。
+FastAPI 推理服务：接收文字 prompt + 可选参考图（ControlNet），返回 AI 生成的图片/3D模型/PBR材质。
 
 启动方式：
     cd d:\aigc-project\inference_server
     uvicorn main:app --host 127.0.0.1 --port 8000
 
 接口说明：
-    POST /generate            → txt2img（纯文本生图，向后兼容）
+    POST /generate             → txt2img（纯文本生图，向后兼容）
     POST /generate-controlled  → ControlNet 可控生成（图片 + prompt）
-    GET  /health              → 检查服务是否就绪
+    POST /generate-3d          → TripoSR 图片转 3D 模型
+    POST /generate-pbr         → StableMaterials PBR 材质生成
+    GET  /health               → 检查服务是否就绪
 """
 import os
 import sys
@@ -24,6 +26,7 @@ import io
 import time
 import json
 import traceback
+import zipfile
 from pathlib import Path
 from datetime import datetime
 
@@ -40,6 +43,9 @@ from model_loader import (
     get_controlnet_pipeline,
     get_available_controlnet_modes,
     get_triposr_model,
+    get_pbr_pipeline,
+    _restore_sd_pipeline,
+    _pbr_pipeline,
 )
 
 
@@ -80,14 +86,15 @@ class HealthResponse(BaseModel):
     lora_loaded: bool
     controlnet_modes: list
     triposr_loaded: bool
+    pbr_loaded: bool = False
     uptime_seconds: float
 
 
 # ===== FastAPI 应用 =====
 app = FastAPI(
-    title="AIGC LoRA 推理服务",
-    description="用训练好的原神风格 LoRA + ControlNet 生成动漫图片",
-    version="0.2.0",
+    title="AIGC 推理服务",
+    description="LoRA/ControlNet/TripoSR/StableMaterials — 游戏资产全自动生成",
+    version="0.3.0",
 )
 
 _start_time: float | None = None
@@ -226,6 +233,7 @@ async def startup():
     print(f"  API 文档 → http://127.0.0.1:8000/docs", flush=True)
     print(f"  ControlNet 可用: {available}", flush=True)
     print(f"  TripoSR 3D 生成: 首次使用自动下载（~1.68GB）", flush=True)
+    print(f"  StableMaterials PBR 材质: 首次使用自动下载（~2-3GB）", flush=True)
     print("=" * 50, flush=True)
 
 
@@ -568,6 +576,145 @@ async def generate_3d(
     )
 
 
+# ===== PBR 材质生成接口 =====
+
+@app.post("/generate-pbr")
+async def generate_pbr(
+    prompt: str = Form(..., description="材质描述（英文），如 'rough stone wall'"),
+    tileable: bool = Form(True, description="是否生成无缝平铺贴图"),
+    steps: int = Form(25, ge=5, le=50),
+    guidance_scale: float = Form(10.0, ge=1.0, le=20.0),
+    seed: int | None = Form(None),
+):
+    """
+    PBR 材质生成：输入文字描述，AI 自动生成完整的 PBR 纹理贴图集。
+
+    返回 ZIP 压缩包，包含：
+      - basecolor.png          — 基础颜色贴图（sRGB）
+      - normal.png             — 法线方向贴图
+      - metallic_smoothness.png — R=金属度, A=光滑度（已打包，Unity Standard Shader 直接可用）
+      - height.png             — 高度/置换贴图
+      - roughness_raw.png      — 原始粗糙度贴图（调试用）
+      - preview.png            — 256px 预览缩略图
+
+    纹理尺寸：512×512（SD 原生分辨率）
+    推理时间：LCM 4 步约 5-10 秒（首次需下载模型 ~2-3GB）
+    """
+    from model_loader import get_pbr_pipeline, _restore_sd_pipeline
+
+    print(f"\n[generate-pbr] prompt: {prompt[:80]}...", flush=True)
+    print(f"[generate-pbr] tileable={tileable}, steps={steps}, "
+          f"cfg={guidance_scale}", flush=True)
+
+    # 获取 PBR 管线（首次自动下载权重，同时卸载 SD 管线）
+    try:
+        pipe = get_pbr_pipeline()
+    except Exception as e:
+        print(f"[generate-pbr] PBR 管线加载失败: {e}", flush=True)
+        _restore_sd_pipeline()
+        raise HTTPException(status_code=500, detail=f"PBR 模型加载失败: {str(e)}")
+
+    # 推理
+    actual_seed = seed if seed is not None else int(time.time() * 1000) % (2**31)
+
+    try:
+        generator_obj = torch.Generator(device=pipe.device).manual_seed(actual_seed)
+        with torch.no_grad():
+            result = pipe(
+                prompt=prompt,
+                num_inference_steps=steps,
+                guidance_scale=guidance_scale,
+                generator=generator_obj,
+                tileable=tileable,
+            )
+
+        # 解包 5 张 PBR 贴图（result.images[0] 是 StableMaterialsMaterial 对象）
+        material = result.images[0]
+        basecolor: Image.Image = material.basecolor
+        normal: Image.Image = material.normal
+        height: Image.Image = material.height
+        roughness: Image.Image = material.roughness
+        metallic: Image.Image = material.metallic
+    except AttributeError as e:
+        _restore_sd_pipeline()
+        print(f"[generate-pbr] 结果解包失败（模型返回格式不符预期）: {e}", flush=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"PBR 贴图解包失败: {e}。请检查 StableMaterials 模型版本是否兼容。"
+        )
+    except torch.cuda.OutOfMemoryError:
+        _restore_sd_pipeline()
+        raise HTTPException(status_code=500, detail="GPU 显存不足，无法生成 PBR 材质。请重启服务后重试。")
+    except Exception as e:
+        _restore_sd_pipeline()
+        print(f"[generate-pbr] 推理失败: {traceback.format_exc()}", flush=True)
+        raise HTTPException(status_code=500, detail=f"PBR 材质生成失败: {str(e)}")
+
+    # 存档 + 纹理打包
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+    safe_prompt = prompt[:20].replace(" ", "_").replace(",", "").replace("/", "_")
+
+    def _save_map(img: Image.Image, suffix: str) -> Path:
+        path = OUTPUT_DIR / f"{timestamp}_pbr_{safe_prompt}_{suffix}.png"
+        img.save(path)
+        return path
+
+    _save_map(basecolor, "basecolor")
+    _save_map(normal, "normal")
+    _save_map(height, "height")
+    _save_map(roughness, "roughness_raw")
+    _save_map(metallic, "metallic_raw")
+
+    # 打包 Metallic(R) + Smoothness(1-Roughness, A) → Unity _MetallicGlossMap
+    metallic_arr = np.array(metallic.convert("L"))
+    roughness_arr = np.array(roughness.convert("L"))
+    smoothness_arr = (255 - roughness_arr).astype(np.uint8)
+
+    h, w = metallic_arr.shape
+    packed = np.zeros((h, w, 4), dtype=np.uint8)
+    packed[:, :, 0] = metallic_arr    # R = Metallic
+    packed[:, :, 3] = smoothness_arr  # A = Smoothness (1 - Roughness)
+
+    packed_img = Image.fromarray(packed, mode="RGBA")
+    _save_map(packed_img, "metallic_smoothness")
+
+    # 生成预览缩略图（Basecolor 缩小到 256x256）
+    preview = basecolor.copy()
+    preview.thumbnail((256, 256), Image.LANCZOS)
+    _save_map(preview, "preview")
+
+    # 打包 ZIP
+    zip_buffer = io.BytesIO()
+    with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+        for suffix in [
+            "basecolor", "normal", "height",
+            "roughness_raw", "metallic_raw",
+            "metallic_smoothness", "preview",
+        ]:
+            file_path = OUTPUT_DIR / f"{timestamp}_pbr_{safe_prompt}_{suffix}.png"
+            if file_path.exists():
+                zf.write(file_path, f"{suffix}.png")
+
+    zip_buffer.seek(0)
+    zip_data = zip_buffer.getvalue()
+
+    # 恢复 SD 管线到 GPU
+    _restore_sd_pipeline()
+
+    print(f"[generate-pbr] PBR 材质生成完成（seed={actual_seed}, "
+          f"ZIP={len(zip_data)/1024:.0f} KB）。", flush=True)
+
+    return Response(
+        content=zip_data,
+        media_type="application/zip",
+        headers={
+            "X-Seed": str(actual_seed),
+            "X-Filename": f"{timestamp}_pbr_{safe_prompt}",
+            "X-Tileable": str(tileable).lower(),
+        },
+    )
+
+
 # ===== 健康检查 =====
 
 @app.get("/health")
@@ -583,17 +730,20 @@ async def health():
     lora_loaded = Path(r"D:\aigc-project\lora_output\adapter_model.safetensors").exists()
     uptime = (time.time() - _start_time) if _start_time else 0
 
-    # 检查 TripoSR 状态（不触发加载）
+    # 检查 TripoSR / PBR 状态（不触发加载）
     from model_loader import _triposr_model
     triposr_loaded = _triposr_model is not None
+    from model_loader import _pbr_pipeline
+    pbr_loaded = _pbr_pipeline is not None
 
     return HealthResponse(
         status="ready" if pipe is not None else "loading",
-        model="Counterfeit-V2.5 + LoRA (原神风格) + ControlNet + TripoSR",
+        model="Counterfeit-V2.5 + LoRA (原神风格) + ControlNet + TripoSR + StableMaterials",
         device="cuda" if (pipe and str(pipe.device).startswith("cuda")) else "cpu",
         lora_loaded=lora_loaded,
         controlnet_modes=get_loaded_controlnet_modes() or get_available_controlnet_modes(),
         triposr_loaded=triposr_loaded,
+        pbr_loaded=pbr_loaded,
         uptime_seconds=round(uptime, 1),
     )
 
@@ -608,7 +758,7 @@ async def root():
 @app.on_event("shutdown")
 async def shutdown():
     """服务关闭时释放 GPU 显存。"""
-    from model_loader import get_pipeline, _triposr_model
+    from model_loader import get_pipeline, _triposr_model, _pbr_pipeline
 
     pipe = get_pipeline()
     if pipe is not None:
@@ -619,6 +769,12 @@ async def shutdown():
         del _triposr_model
         import model_loader
         model_loader._triposr_model = None
+
+    # 清理 PBR 管线
+    if _pbr_pipeline is not None:
+        del _pbr_pipeline
+        import model_loader
+        model_loader._pbr_pipeline = None
 
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
