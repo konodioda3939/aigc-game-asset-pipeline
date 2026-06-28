@@ -342,6 +342,11 @@ async def generate_controlled(
 
     print(f"[generate-controlled] 预处理完成, control_image_size={control_image.size}", flush=True)
 
+    # ---- 2.5 确保预处理图尺寸与缩放后一致（HED/MiDaS 等可能改变尺寸）----
+    if control_image.size != ref_image.size:
+        print(f"[generate-controlled] 预处理图尺寸不一致，对齐到 {ref_image.size}", flush=True)
+        control_image = control_image.resize(ref_image.size, Image.LANCZOS)
+
     # ---- 3. 获取 ControlNet 管线 ----
     try:
         pipe = get_controlnet_pipeline(control_mode)

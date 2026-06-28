@@ -267,9 +267,12 @@ def _download_single_file(
 
     hf_hub_download 默认启用 resume_download，
     下载中断后重试会自动从断点继续。
+
+    注意：404（文件不存在）不重试，直接抛出让上层回退到其他格式。
     """
     import time
     from huggingface_hub import hf_hub_download
+    from huggingface_hub.utils import EntryNotFoundError
 
     last_error = None
     for attempt in range(1, max_retries + 1):
@@ -281,6 +284,10 @@ def _download_single_file(
                 resume_download=True,
             )
             return  # 成功
+        except EntryNotFoundError:
+            # 404 意味着服务端根本没有这个文件，重试毫无意义
+            # 直接抛出，让上层 _download_and_load_controlnet 回退到 fp32
+            raise
         except Exception as e:
             last_error = e
             if attempt < max_retries:
