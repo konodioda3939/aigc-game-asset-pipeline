@@ -1,0 +1,50 @@
+{
+  "_description": "游戏素材生成 — 统一入口：三种风格 × 两种模式（文字直出 / ControlNet精修）",
+  "negative_prompt": "lowres, bad anatomy, bad hands, text, error, cropped, worst quality, low quality, normal quality, jpeg artifacts, signature, watermark, blurry, ugly, deformed",
+
+  "resolution": {"width": 512, "height": 512},
+
+  "styles": {
+    "icon": {
+      "label": "⚔️ 图标",
+      "suffix": "game icon, centered composition, clean design, isolated, high contrast, polished, vibrant colors, simple shapes, game asset",
+      "negative_extra": "realistic, photo, 3D render, complex background, cluttered",
+      "width": 512,
+      "height": 512,
+      "post_remove_bg": true,
+      "post_center_crop": true
+    },
+    "scene": {
+      "label": "🏞️ 场景",
+      "suffix": "game environment concept art, atmospheric, cinematic composition, wide shot, highly detailed, beautiful lighting",
+      "negative_extra": "characters, people, person, human, UI elements, interface, close-up, portrait",
+      "width": 768,
+      "height": 512,
+      "post_remove_bg": false,
+      "post_center_crop": false
+    },
+    "ui": {
+      "label": "🎨 UI 元素",
+      "suffix": "game UI element, clean interface, professional, flat design, simple, centered, polished, game interface asset",
+      "negative_extra": "realistic, photo, 3D, character, person, landscape, complex scene",
+      "width": 512,
+      "height": 512,
+      "post_remove_bg": false,
+      "post_center_crop": false
+    }
+  },
+
+  "default_style": "icon",
+
+  "controlnet": {
+    "modes": ["canny", "scribble", "depth"],
+    "default_mode": "canny",
+    "default_strength": 0.85,
+    "strength_hint": {
+      "canny": 0.85,
+      "scribble": 0.75,
+      "depth": 0.90
+    }
+  }
+
+}

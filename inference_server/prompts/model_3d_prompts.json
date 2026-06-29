@@ -1,0 +1,8 @@
+{
+  "_description": "3D 模型生成 — TripoSR 图片转 3D mesh",
+  "style_suffix": "",
+  "negative_prompt": "",
+  "resolution": {"width": 512, "height": 512},
+  "default_resolution": 256,
+  "output_format": "glb"
+}

@@ -18,6 +18,7 @@
 | 里程碑4 | ControlNet 可控生成（Canny 线稿 / Scribble 草图 / Depth 深度） | ✅ |
 | 里程碑5 | TripoSR 图片转 3D 模型（去背景 → 推理 → .glb → Unity Prefab） | ✅ |
 | 里程碑6 | StableMaterials PBR 材质生成（prompt → BaseColor/Normal/Roughness/Metallic → Unity Material） | ✅ |
+| 里程碑7 | 游戏美术工作流引擎（4 条标准化产线 → 一键切换 → 零新模型依赖） | ✅ |
 
 **已知局限：**
 
@@ -311,6 +312,65 @@ D:/anaconda3/envs/GPUpytorch-env/python.exe -m uvicorn main:app --host 127.0.0.1
 - 复杂空间关系/图案精度有限
 - 独立架构不与现有 SD/LoRA 共享组件
 - Triplanar 法线混合在极端锐角处可能有轻微不连续
+
+---
+
+### 简易游戏美术工作流引擎（里程碑 7）
+
+**核心理念**：将 AI 能力封装为标准化「产线」，美术人员不需要懂技术——选择工作流 → 输入描述 → 点生成。
+
+> **与计划书的差异**：原定搭建 ComfyUI 工作流，但 ComfyUI（~10GB+）在 8GB 显存下无法与现有管线共存。实际落地为**轻量级工作流引擎**，复用 SD 1.5 + LoRA + ControlNet + TripoSR + StableMaterials 全局单例。零额外显存、零新模型下载。核心理念一致：标准化产线。
+
+**4 条工作流**：
+
+| 工作流 | 输入 | 输出 | 管线 |
+|--------|------|------|------|
+| `character_concept` 角色概念图 | 文字描述 | 1024×576 角色转身图（多角度单图） | txt2img + turnaround sheet prompt |
+| `asset_generator` 游戏素材生成 | 文字 + 可选参考图 | 图标/场景/UI（三种风格切换） | txt2img 或 ControlNet（canny/scribble/depth） |
+| `model_3d` 3D 模型生成 | 物体图片 | .obj/.glb 3D 模型 | TripoSR（rembg→推理→Marching Cubes） |
+| `pbr_material` PBR 材质 | 材质描述 | ZIP 含 7 张 PBR 贴图 | StableMaterials |
+
+**架构**：
+- 零额外显存（复用 SD 1.5 + LoRA + ControlNet 全局单例）
+- 零新模型下载（全部使用已有缓存）
+- Prompt 模板从代码分离到 `prompts/*.json`（美术可自行调风格）
+- Web UI（`/workflow-ui/`）+ Unity 插件 + API 三端统一
+
+**API 接口**：
+
+| 接口 | 方法 | 用途 |
+|------|------|------|
+| `/workflows` | GET | 列出所有工作流 + 输入参数 schema |
+| `/workflows/run` | POST | 执行工作流（multipart/form-data） |
+| `/workflow-ui/` | GET | Web 演示界面（静态页面） |
+
+**文件结构**：
+```
+inference_server/
+├── workflows/           ← 工作流编排（BaseWorkflow + 4 个子类）
+│   ├── workflow_base.py        ← 基类（txt2img/img2img/ControlNet 封装 + 后处理）
+│   ├── character_concept.py    ← 角色转身图（turnaround sheet prompt）
+│   ├── asset_generator.py      ← 游戏素材生成（三种风格 × 两种模式）
+│   ├── model_3d.py             ← 3D 模型（TripoSR 封装，含输入图自动缩放）
+│   └── pbr_material.py         ← PBR 材质（StableMaterials 封装）
+├── prompts/             ← Prompt 模板引擎 + 4 个 JSON 模板
+├── web_ui/              ← Web 演示界面（index.html，单页应用）
+├── main.py              ← + /workflows、/workflows/run、422 错误日志、StaticFiles mount
+└── start_workflows.bat  ← 一键启动（含 Web UI 提示）
+```
+
+**Unity 集成**：
+- `AIGCWindow.cs`：GenerationModeNames 新增「工作流」，动态表单（风格/ControlNet 模式选择器）
+- `AIGCClient.cs`：新增 `RunWorkflow()` 方法（处理 PNG/ZIP/GLB/OBJ 四种响应）
+- `AssetImporter.cs`：新增 `SaveWorkflowZip()` → PNG 自动导入
+- `WorkflowPresets.cs`：4 个工作流预设定义（character_concept / asset_generator / model_3d / pbr_material）
+
+**设计亮点**：
+- 角色概念图用「character turnaround sheet」单次生成多角度，天然角色一致（不再用 img2img 链）
+- 游戏素材三种风格（图标/场景/UI）统一入口，公共 ControlNet 管线
+- 输入图自动缩放到 ≤768px（ControlNet）或 ≤1024px（TripoSR），防止显存爆炸
+- API 422 错误自动记录表单字段详情，快速排查前端参数遗漏
+- Web UI 生成结果留在弹窗内展示，不再自动关闭，用户看完手动关
 
 ---
 

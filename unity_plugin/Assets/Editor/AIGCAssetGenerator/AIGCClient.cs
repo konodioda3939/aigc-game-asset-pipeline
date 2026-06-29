@@ -402,6 +402,164 @@ namespace AIGCAssetGenerator
         }
 
         /// <summary>
+        /// 执行游戏美术工作流。
+        ///
+        /// 根据工作流 ID 和参数调用 /workflows/run 接口，
+        /// 返回包含生成图片/数据的工作流结果。
+        /// </summary>
+        /// <param name="workflowId">工作流 ID: character_concept / prop_icon / scene_mood / ui_elements</param>
+        /// <param name="prompt">描述文字</param>
+        /// <param name="referenceImage">可选参考图（道具图标/UI元素）</param>
+        /// <param name="mood">氛围选择（场景氛围图）</param>
+        /// <param name="seed">随机种子</param>
+        /// <param name="steps">推理步数</param>
+        /// <param name="guidanceScale">引导强度</param>
+        /// <param name="extraParams">额外参数字典（stitch_grid, remove_bg, wide, elements, variants 等）</param>
+        /// <returns>WorkflowResult 包含生成结果</returns>
+        public static async Task<WorkflowResult> RunWorkflow(
+            string workflowId,
+            string prompt,
+            Texture2D referenceImage = null,
+            string mood = "",
+            int? seed = null,
+            int steps = 25,
+            float guidanceScale = 7.5f,
+            Dictionary<string, string> extraParams = null)
+        {
+            if (string.IsNullOrWhiteSpace(workflowId))
+                throw new ArgumentException("Workflow ID cannot be empty.", nameof(workflowId));
+            if (string.IsNullOrWhiteSpace(prompt))
+                throw new ArgumentException("Prompt cannot be empty.", nameof(prompt));
+
+            // 构造 multipart/form-data
+            var formData = new System.Collections.Generic.List<IMultipartFormSection>
+            {
+                new MultipartFormDataSection("workflow", workflowId),
+                new MultipartFormDataSection("prompt", prompt),
+                new MultipartFormDataSection("steps", steps.ToString()),
+                new MultipartFormDataSection("guidance_scale",
+                    guidanceScale.ToString("F1", System.Globalization.CultureInfo.InvariantCulture)),
+            };
+
+            if (seed.HasValue)
+                formData.Add(new MultipartFormDataSection("seed", seed.Value.ToString()));
+
+            if (!string.IsNullOrEmpty(mood))
+                formData.Add(new MultipartFormDataSection("mood", mood));
+
+            // 参考图
+            if (referenceImage != null)
+            {
+                Texture2D readable = MakeTextureReadable(referenceImage);
+                try
+                {
+                    byte[] pngBytes = readable.EncodeToPNG();
+                    if (pngBytes != null && pngBytes.Length > 0)
+                        formData.Add(new MultipartFormFileSection("reference_image", pngBytes,
+                            "reference.png", "image/png"));
+                }
+                finally
+                {
+                    if (readable != referenceImage)
+                        UnityEngine.Object.DestroyImmediate(readable);
+                }
+            }
+
+            // 额外参数
+            if (extraParams != null)
+            {
+                foreach (var kvp in extraParams)
+                {
+                    if (!string.IsNullOrEmpty(kvp.Key) && !string.IsNullOrEmpty(kvp.Value))
+                        formData.Add(new MultipartFormDataSection(kvp.Key, kvp.Value));
+                }
+            }
+
+            string url = $"{AIGCSettings.ApiBaseUrl}/workflows/run";
+
+            using (var request = UnityWebRequest.Post(url, formData))
+            {
+                request.timeout = 300; // 工作流可能生成多张图，给充足时间
+
+                var tcs = new TaskCompletionSource<bool>();
+                var operation = request.SendWebRequest();
+                operation.completed += _ => tcs.SetResult(true);
+                await tcs.Task;
+
+                if (request.result != UnityWebRequest.Result.Success)
+                {
+                    string detail = request.downloadHandler?.text ?? request.error;
+                    throw new AIGCException(
+                        $"工作流执行失败: {request.error}\n" +
+                        $"详细信息: {detail}\n\n" +
+                        $"请确认推理服务已启动。"
+                    );
+                }
+
+                // 解析响应头
+                string responseSeed = request.GetResponseHeader("X-Seed") ?? seed?.ToString() ?? "?";
+                string format = request.GetResponseHeader("content-type") ?? "";
+                string responseMood = request.GetResponseHeader("X-Mood") ?? "";
+
+                var result = new WorkflowResult
+                {
+                    WorkflowId = workflowId,
+                    Seed = responseSeed,
+                    Mood = responseMood,
+                };
+
+                if (format.Contains("application/zip"))
+                {
+                    // ZIP 格式（UI 元素 / PBR 材质）
+                    result.Format = "zip";
+                    result.ZipData = request.downloadHandler.data;
+
+                    int.TryParse(request.GetResponseHeader("X-Element-Count"),
+                        out int elemCount);
+                    result.ElementCount = elemCount > 0 ? elemCount : 5;
+
+                    Debug.Log($"[AIGC] 工作流结果: ZIP, {result.ZipData.Length / 1024} KB");
+                }
+                else if (format.Contains("model/gltf") || format.Contains("model/obj"))
+                {
+                    // 3D 模型格式 (GLB / OBJ)
+                    string modelFormat = request.GetResponseHeader("X-Format") ?? "glb";
+                    result.Format = modelFormat;
+                    result.ZipData = request.downloadHandler.data;
+
+                    int.TryParse(request.GetResponseHeader("X-Vertices"), out int vertices);
+                    int.TryParse(request.GetResponseHeader("X-Faces"), out int faces);
+                    result.ElementCount = vertices;
+
+                    Debug.Log($"[AIGC] 工作流结果: {modelFormat.ToUpper()}, " +
+                        $"{result.ZipData.Length / 1024} KB, " +
+                        $"vertices={vertices}, faces={faces}");
+                }
+                else
+                {
+                    // PNG 格式（角色概念/道具图标/场景氛围）
+                    result.Format = "png";
+                    result.ImageData = request.downloadHandler.data;
+
+                    if (result.ImageData != null && result.ImageData.Length > 0)
+                    {
+                        Texture2D tex = new Texture2D(2, 2, TextureFormat.RGBA32, false);
+                        if (tex.LoadImage(result.ImageData))
+                        {
+                            result.PreviewImage = tex;
+                        }
+                    }
+
+                    Debug.Log($"[AIGC] 工作流结果: PNG, " +
+                        $"{(result.ImageData?.Length ?? 0) / 1024} KB, " +
+                        $"seed={responseSeed}");
+                }
+
+                return result;
+            }
+        }
+
+        /// <summary>
         /// 检查推理服务是否在线。
         /// </summary>
         /// <returns>true 表示服务就绪</returns>

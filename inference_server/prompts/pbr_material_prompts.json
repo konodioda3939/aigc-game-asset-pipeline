@@ -1,0 +1,8 @@
+{
+  "_description": "PBR 材质生成 — StableMaterials 文字→贴图集",
+  "style_suffix": "",
+  "negative_prompt": "",
+  "resolution": {"width": 512, "height": 512},
+  "default_tileable": true,
+  "default_guidance": 10.0
+}

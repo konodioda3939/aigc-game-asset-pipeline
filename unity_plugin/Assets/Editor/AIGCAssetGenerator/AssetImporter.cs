@@ -519,6 +519,87 @@ namespace AIGCAssetGenerator
         }
 
         /// <summary>
+        /// 将工作流 ZIP 结果解压并导入为项目资产。
+        ///
+        /// ZIP 中包含多个 PNG 文件（如 panel.png, button.png 等），
+        /// 将它们逐个写入 GeneratedAssets/ 目录并刷新 AssetDatabase。
+        /// </summary>
+        /// <param name="zipData">ZIP 文件的原始字节数据</param>
+        /// <param name="baseName">基础文件名（不含扩展名）</param>
+        /// <returns>导入的资产路径列表</returns>
+        public static string[] SaveWorkflowZip(byte[] zipData, string baseName)
+        {
+            if (zipData == null || zipData.Length == 0)
+                throw new ArgumentNullException(nameof(zipData));
+
+            if (string.IsNullOrWhiteSpace(baseName))
+                baseName = "workflow_result";
+
+            baseName = SanitizeFileName(baseName);
+
+            // 确保输出目录存在
+            string fullOutputDir = Path.Combine(Application.dataPath, "GeneratedAssets");
+            if (!Directory.Exists(fullOutputDir))
+                Directory.CreateDirectory(fullOutputDir);
+
+            var importedPaths = new System.Collections.Generic.List<string>();
+
+            // 解压 ZIP
+            using (var stream = new MemoryStream(zipData))
+            using (var archive = new System.IO.Compression.ZipArchive(
+                stream, System.IO.Compression.ZipArchiveMode.Read))
+            {
+                foreach (var entry in archive.Entries)
+                {
+                    if (string.IsNullOrEmpty(entry.Name)) continue;
+                    if (!entry.Name.EndsWith(".png", StringComparison.OrdinalIgnoreCase)) continue;
+
+                    // 提取元素名（从文件名如 "panel.png" → "_panel"）
+                    string elementName = Path.GetFileNameWithoutExtension(entry.Name);
+                    string assetName = $"{baseName}_{elementName}";
+
+                    using (var entryStream = entry.Open())
+                    using (var memStream = new MemoryStream())
+                    {
+                        entryStream.CopyTo(memStream);
+                        byte[] pngBytes = memStream.ToArray();
+
+                        if (pngBytes.Length == 0) continue;
+
+                        string assetPath = GetUniqueAssetPath(assetName, ".png");
+                        string fullPath = Path.Combine(Application.dataPath, "GeneratedAssets",
+                            Path.GetFileName(assetPath));
+
+                        File.WriteAllBytes(fullPath, pngBytes);
+                        importedPaths.Add(assetPath);
+
+                        Debug.Log($"[AIGC] 工作流元素已写入: {fullPath} " +
+                            $"({pngBytes.Length / 1024} KB)");
+                    }
+                }
+            }
+
+            // 刷新 AssetDatabase
+            AssetDatabase.Refresh();
+
+            // 配置所有导入的贴图为 Sprite
+            foreach (var path in importedPaths)
+            {
+                ConfigureTextureImporter(path, "贴图");
+            }
+
+            // 在 Project 窗口中高亮第一个资产
+            if (importedPaths.Count > 0)
+            {
+                EditorGUIUtility.PingObject(
+                    AssetDatabase.LoadAssetAtPath<Texture2D>(importedPaths[0]));
+            }
+
+            Debug.Log($"[AIGC] 工作流 ZIP 导入完成: {importedPaths.Count} 个文件");
+            return importedPaths.ToArray();
+        }
+
+        /// <summary>
         /// 打开 GeneratedAssets 文件夹（在系统文件管理器中）。
         /// </summary>
         public static void OpenOutputFolder()

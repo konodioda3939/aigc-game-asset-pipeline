@@ -26,8 +26,15 @@ namespace AIGCAssetGenerator
         private static readonly string[] AssetTypeNames = { "图标", "贴图", "UI元素" };
 
         // 生成模式
-        private int _generationMode = 0; // 0=文生图, 1=草图精修, 2=3D模型生成, 3=PBR材质
-        private static readonly string[] GenerationModeNames = { "文生图", "草图精修", "3D模型生成", "PBR材质" };
+        private int _generationMode = 0; // 0=文生图, 1=草图精修, 2=3D模型生成, 3=PBR材质, 4=工作流
+        private static readonly string[] GenerationModeNames = { "文生图", "草图精修", "3D模型生成", "PBR材质", "工作流" };
+
+        // 工作流相关状态
+        private int _workflowIndex = 0;
+        private List<WorkflowPreset> _workflowPresets = new List<WorkflowPreset>();
+        private string _workflowStyle = "icon";     // asset_generator: icon/scene/ui
+        private string _workflowControlMode = "canny"; // asset_generator: canny/scribble/depth
+        private WorkflowResult _workflowResult = null;
 
         // ControlNet 参数
         private int _controlModeIndex = 0; // 0=Canny, 1=Scribble
@@ -91,6 +98,9 @@ namespace AIGCAssetGenerator
             _steps = AIGCSettings.DefaultSteps;
             _guidanceScale = AIGCSettings.DefaultGuidanceScale;
 
+            // 加载工作流预设
+            _workflowPresets = WorkflowPresets.GetAll();
+
             // 打开窗口时自动检测服务状态
             _ = CheckServerHealth();
         }
@@ -141,9 +151,19 @@ namespace AIGCAssetGenerator
                     MessageType.Info
                 );
             }
+            else if (_generationMode == 4)
+            {
+                // 工作流模式
+                DrawWorkflowSelector();
+                EditorGUILayout.Space(5);
+                DrawWorkflowFields();
+                EditorGUILayout.Space(5);
+                DrawWorkflowAdvancedOptions();
+                EditorGUILayout.Space(10);
+            }
 
-            // 3D 模式 / PBR 模式：不需要 asset type
-            if (_generationMode != 2 && _generationMode != 3)
+            // 3D 模式 / PBR 模式 / 工作流模式：不需要 asset type
+            if (_generationMode != 2 && _generationMode != 3 && _generationMode != 4)
             {
                 DrawPromptField();
                 EditorGUILayout.Space(5);
@@ -434,14 +454,17 @@ namespace AIGCAssetGenerator
             bool canGenerate = !_isGenerating && (
                 _generationMode == 2
                     ? _referenceTexture != null
-                    : !string.IsNullOrWhiteSpace(_prompt)
+                    : _generationMode == 4
+                        ? !string.IsNullOrWhiteSpace(_prompt)
+                        : !string.IsNullOrWhiteSpace(_prompt)
             );
             GUI.enabled = canGenerate;
 
             string buttonText = _isGenerating ? "生成中..." :
-                _generationMode == 2 ? "生成 3D 模型 (Generate 3D)" :
-                _generationMode == 3 ? "生成 PBR 材质 (Generate PBR)" :
-                "生成 (Generate)";
+                _generationMode == 2 ? "生成 3D 模型" :
+                _generationMode == 3 ? "生成 PBR 材质" :
+                _generationMode == 4 ? "执行工作流" :
+                "生成";
 
             if (GUILayout.Button(buttonText, GUILayout.Height(40)))
             {
@@ -483,6 +506,13 @@ namespace AIGCAssetGenerator
                     $"点击「导入到项目」将模型导入为 Prefab。",
                     MessageType.Info
                 );
+                return;
+            }
+
+            // 工作流模式：显示工作流结果
+            if (_generationMode == 4 && _workflowResult != null)
+            {
+                DrawWorkflowResultPreview();
                 return;
             }
 
@@ -541,6 +571,7 @@ namespace AIGCAssetGenerator
             {
                 2 => _generatedModelBytes != null,
                 3 => _generatedPBRTextures != null,
+                4 => _workflowResult != null,
                 _ => _generatedTexture != null,
             };
             GUI.enabled = (hasResult && !_isGenerating);
@@ -551,6 +582,7 @@ namespace AIGCAssetGenerator
             {
                 2 => "导入 3D 模型到项目",
                 3 => "导入 PBR 材质到项目",
+                4 => "导入工作流结果",
                 _ => "导入到项目 (Import to Project)",
             };
 
@@ -569,6 +601,188 @@ namespace AIGCAssetGenerator
             GUI.enabled = true;
         }
 
+        // ===== 工作流 UI =====
+
+        private void DrawWorkflowSelector()
+        {
+            EditorGUILayout.LabelField("工作流类型", EditorStyles.boldLabel);
+
+            if (_workflowPresets.Count == 0)
+            {
+                EditorGUILayout.HelpBox("工作流预设未加载。", MessageType.Warning);
+                return;
+            }
+
+            // 构建工作流名称列表
+            string[] wfNames = new string[_workflowPresets.Count];
+            for (int i = 0; i < _workflowPresets.Count; i++)
+                wfNames[i] = $"{_workflowPresets[i].Icon} {_workflowPresets[i].Name}";
+
+            _workflowIndex = GUILayout.Toolbar(_workflowIndex, wfNames, GUILayout.Height(30));
+
+            if (_workflowIndex < _workflowPresets.Count)
+            {
+                var wf = _workflowPresets[_workflowIndex];
+                EditorGUILayout.LabelField(
+                    $"  {wf.Description}",
+                    EditorStyles.miniLabel
+                );
+            }
+        }
+
+        private void DrawWorkflowFields()
+        {
+            if (_workflowPresets.Count == 0) return;
+            var wf = _workflowPresets[_workflowIndex];
+
+            // Prompt 输入框（所有工作流都需要）
+            EditorGUILayout.LabelField("描述文字 (Prompt)", EditorStyles.boldLabel);
+            EditorGUILayout.HelpBox(wf.GetPromptHint(), MessageType.None);
+            _prompt = EditorGUILayout.TextArea(_prompt, GUILayout.Height(60));
+
+            EditorGUILayout.Space(5);
+
+            // 工作流特定字段
+            switch (wf.Id)
+            {
+                case "character_concept":
+                    EditorGUILayout.HelpBox(
+                        "输入角色描述 → AI 一次生成转身图（1024×576），\n" +
+                        "包含正面/侧面/背面/3/4 多角度，角色天然一致。",
+                        MessageType.Info
+                    );
+                    break;
+
+                case "asset_generator":
+                    DrawStyleSelector();
+                    EditorGUILayout.Space(3);
+                    DrawReferenceImageField_Workflow("参考图（可选，拖入参考图启用以 ControlNet 精修）");
+                    EditorGUILayout.Space(3);
+                    // 有参考图时显示 ControlNet 模式选择
+                    if (_referenceTexture != null)
+                    {
+                        DrawControlModeSelector_Workflow();
+                    }
+                    break;
+
+                case "model_3d":
+                    DrawReferenceImageField_Workflow("参考图（必须 — 上传物体/角色正面照）");
+                    EditorGUILayout.HelpBox(
+                        "推荐白色或纯色背景的物体正面照。\n" +
+                        "AI 会自动去背景、生成 3D mesh 并导出 .glb。",
+                        MessageType.Info
+                    );
+                    break;
+
+                case "pbr_material":
+                    EditorGUILayout.HelpBox(
+                        "输入英文材质描述，AI 自动生成完整 PBR 贴图集。\n" +
+                        "例如: \"rough stone wall\", \"wooden floor planks\"",
+                        MessageType.Info
+                    );
+                    break;
+            }
+        }
+
+        private void DrawReferenceImageField_Workflow(string label)
+        {
+            EditorGUILayout.LabelField(label, EditorStyles.boldLabel);
+            _referenceTexture = (Texture2D)EditorGUILayout.ObjectField(
+                "选择参考图",
+                _referenceTexture,
+                typeof(Texture2D),
+                false,
+                GUILayout.Height(18)
+            );
+        }
+
+        private void DrawStyleSelector()
+        {
+            EditorGUILayout.LabelField("素材风格", EditorStyles.boldLabel);
+            int styleIndex = _workflowStyle switch { "scene" => 1, "ui" => 2, _ => 0 };
+            styleIndex = GUILayout.Toolbar(styleIndex,
+                new[] { "⚔️ 图标", "🏞️ 场景", "🎨 UI 元素" }, GUILayout.Height(25));
+            _workflowStyle = styleIndex switch { 1 => "scene", 2 => "ui", _ => "icon" };
+
+            string hint = _workflowStyle switch
+            {
+                "icon" => "图标模式：自动去背景 + 居中，适合道具/技能图标",
+                "scene" => "场景模式：宽幅构图（768×512），可选氛围关键词",
+                "ui" => "UI 模式：干净界面风格，适合面板/按钮等界面元素",
+                _ => ""
+            };
+            EditorGUILayout.LabelField($"  {hint}", EditorStyles.miniLabel);
+        }
+
+        private void DrawControlModeSelector_Workflow()
+        {
+            EditorGUILayout.LabelField("ControlNet 模式", EditorStyles.boldLabel);
+            int cmIndex = _workflowControlMode switch { "scribble" => 1, "depth" => 2, _ => 0 };
+            cmIndex = GUILayout.Toolbar(cmIndex,
+                new[] { "📐 Canny", "✏️ Scribble", "📏 Depth" }, GUILayout.Height(22));
+            _workflowControlMode = cmIndex switch { 1 => "scribble", 2 => "depth", _ => "canny" };
+        }
+
+        private void DrawWorkflowAdvancedOptions()
+        {
+            _showAdvanced = EditorGUILayout.Foldout(_showAdvanced, "高级选项");
+            if (!_showAdvanced) return;
+
+            EditorGUI.indentLevel++;
+
+            _steps = EditorGUILayout.IntSlider("推理步数", _steps, 10, 100);
+            EditorGUILayout.LabelField(
+                $"  当前: {_steps} 步 — 步数越多越精细，但生成越慢。",
+                EditorStyles.miniLabel
+            );
+
+            _guidanceScale = EditorGUILayout.Slider("引导强度 (CFG)", _guidanceScale, 1f, 20f);
+            EditorGUILayout.LabelField(
+                $"  当前: {_guidanceScale:F1} — 越高越贴近描述。",
+                EditorStyles.miniLabel
+            );
+
+            _useFixedSeed = EditorGUILayout.Toggle("固定随机种子", _useFixedSeed);
+            if (_useFixedSeed)
+                _fixedSeedValue = EditorGUILayout.IntField("种子值", _fixedSeedValue);
+
+            EditorGUI.indentLevel--;
+        }
+
+        private void DrawWorkflowResultPreview()
+        {
+            if (_workflowResult == null) return;
+
+            EditorGUILayout.LabelField("工作流结果", EditorStyles.boldLabel);
+
+            if (_workflowResult.Format == "zip")
+            {
+                EditorGUILayout.HelpBox(
+                    $"工作流执行成功！\n" +
+                    $"格式: ZIP 压缩包\n" +
+                    $"包含: {_workflowResult.ElementCount} 个 UI 元素 PNG\n" +
+                    $"种子: {_workflowResult.Seed}\n\n" +
+                    $"点击「导入工作流结果」将所有元素解压到项目。",
+                    MessageType.Info
+                );
+            }
+            else if (_workflowResult.PreviewImage != null)
+            {
+                float previewWidth = Mathf.Min(position.width - 40, 512);
+                float aspect = (float)_workflowResult.PreviewImage.height / _workflowResult.PreviewImage.width;
+                float previewHeight = previewWidth * aspect;
+
+                Rect previewRect = GUILayoutUtility.GetRect(previewWidth, previewHeight,
+                    GUILayout.MaxWidth(previewWidth), GUILayout.MaxHeight(previewHeight));
+                EditorGUI.DrawPreviewTexture(previewRect, _workflowResult.PreviewImage, null, ScaleMode.ScaleToFit);
+
+                string info = $"工作流: {_workflowResult.WorkflowId} | 种子: {_workflowResult.Seed}";
+                if (!string.IsNullOrEmpty(_workflowResult.Mood))
+                    info += $" | 氛围: {_workflowResult.Mood}";
+                EditorGUILayout.LabelField(info, EditorStyles.miniLabel);
+            }
+        }
+
         // ===== 业务逻辑 =====
 
         /// <summary>
@@ -577,9 +791,16 @@ namespace AIGCAssetGenerator
         private async Task DoGenerate()
         {
             // 文生图/草图精修/PBR 模式需要 prompt；仅 3D 模式不需要
-            if (_generationMode != 2 && string.IsNullOrWhiteSpace(_prompt))
+            if (_generationMode != 2 && _generationMode != 4 && string.IsNullOrWhiteSpace(_prompt))
             {
                 SetStatus("请输入画面描述 (Prompt)。", MessageType.Warning);
+                return;
+            }
+
+            // 工作流模式：只需要 prompt
+            if (_generationMode == 4 && string.IsNullOrWhiteSpace(_prompt))
+            {
+                SetStatus("请输入描述文字。", MessageType.Warning);
                 return;
             }
 
@@ -615,6 +836,7 @@ namespace AIGCAssetGenerator
                 1 => "ControlNet 生成中，首次需下载模型（约 1.4GB），请耐心等待...",
                 2 => "TripoSR 3D 模型生成中，首次需下载模型（约 1.68GB），请耐心等待...",
                 3 => "StableMaterials PBR 材质生成中，首次需下载模型（约 2-3GB），请耐心等待...",
+                4 => "工作流执行中，请耐心等待（通常 10~30 秒）...",
                 _ => "生成中..."
             };
             SetStatus(waitMsg, MessageType.Info);
@@ -681,6 +903,59 @@ namespace AIGCAssetGenerator
                         MessageType.Info
                     );
                 }
+                else if (_generationMode == 4)
+                {
+                    // 工作流生成
+                    if (_workflowPresets.Count == 0)
+                    {
+                        SetStatus("工作流预设未加载。", MessageType.Error);
+                        return;
+                    }
+                    var wfPreset = _workflowPresets[_workflowIndex];
+
+                    // 构建额外参数
+                    var extraParams = new System.Collections.Generic.Dictionary<string, string>();
+
+                    if (wfPreset.Id == "character_concept")
+                    {
+                        // 转身图模式，无需额外参数
+                    }
+                    else if (wfPreset.Id == "asset_generator")
+                    {
+                        extraParams["style"] = _workflowStyle;
+                        if (_referenceTexture != null)
+                            extraParams["control_mode"] = _workflowControlMode;
+                    }
+                    else if (wfPreset.Id == "model_3d")
+                    {
+                        extraParams["resolution"] = _modelResolution.ToString();
+                        // 输出格式：从 workflow preset 字段或默认 obj
+                        extraParams["output_format"] = _modelFormatIndex == 1 ? "glb" : "obj";
+                    }
+                    else if (wfPreset.Id == "pbr_material")
+                    {
+                        extraParams["tileable"] = _pbrTileable ? "true" : "false";
+                    }
+
+                    var wfResult = await AIGCClient.RunWorkflow(
+                        workflowId: wfPreset.Id,
+                        prompt: _prompt.Trim(),
+                        referenceImage: _referenceTexture,
+                        mood: _workflowMood,
+                        seed: seed,
+                        steps: _steps,
+                        guidanceScale: _guidanceScale,
+                        extraParams: extraParams
+                    );
+
+                    _workflowResult = wfResult;
+                    _lastGeneratedSeed = wfResult.Seed;
+
+                    string resultDesc = wfResult.Format == "zip"
+                        ? $"生成成功！ZIP 含 {wfResult.ElementCount} 个 UI 元素"
+                        : $"生成成功！(seed={wfResult.Seed})";
+                    SetStatus(resultDesc, MessageType.Info);
+                }
                 else
                 {
                     // 3D 模型生成
@@ -732,6 +1007,71 @@ namespace AIGCAssetGenerator
         /// </summary>
         private void DoImport()
         {
+            if (_generationMode == 4)
+            {
+                // 工作流导入
+                if (_workflowResult == null)
+                {
+                    SetStatus("没有可导入的工作流结果，请先生成。", MessageType.Warning);
+                    return;
+                }
+
+                try
+                {
+                    string baseName = GenerateAssetName(string.IsNullOrWhiteSpace(_prompt) ? "workflow" : _prompt);
+
+                    if (_workflowResult.Format == "zip")
+                    {
+                        // ZIP 格式：解压并导入每个 PNG
+                        string[] importedPaths = AssetImporter.SaveWorkflowZip(
+                            _workflowResult.ZipData, baseName);
+                        SetStatus(
+                            $"工作流结果导入成功！\n导入 {importedPaths.Length} 个文件到 GeneratedAssets/。",
+                            MessageType.Info
+                        );
+                    }
+                    else if (_workflowResult.Format == "glb" || _workflowResult.Format == "obj")
+                    {
+                        // 3D 模型（GLB 或 OBJ）
+                        if (_workflowResult.ZipData != null && _workflowResult.ZipData.Length > 0)
+                        {
+                            string fmt = _workflowResult.Format;
+                            string prefabPath = AssetImporter.SaveAsModel(
+                                _workflowResult.ZipData, baseName, fmt);
+                            SetStatus(
+                                $"3D 模型导入成功！({fmt.ToUpper()})\n路径: {prefabPath}",
+                                MessageType.Info
+                            );
+                        }
+                        else
+                        {
+                            SetStatus("3D 模型数据为空，无法导入。", MessageType.Warning);
+                        }
+                    }
+                    else if (_workflowResult.PreviewImage != null)
+                    {
+                        // PNG 格式：保存单个/拼接图片
+                        string assetPath = AssetImporter.SaveAsAsset(
+                            _workflowResult.PreviewImage, baseName, "贴图");
+                        SetStatus(
+                            $"工作流结果导入成功！\n路径: {assetPath}",
+                            MessageType.Info
+                        );
+                    }
+                    else
+                    {
+                        SetStatus("工作流结果为空，无法导入。", MessageType.Warning);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    SetStatus($"工作流导入失败: {ex.Message}", MessageType.Error);
+                    Debug.LogError($"[AIGC] 工作流导入失败: {ex}");
+                }
+
+                return;
+            }
+
             if (_generationMode == 2)
             {
                 // 3D 模型导入

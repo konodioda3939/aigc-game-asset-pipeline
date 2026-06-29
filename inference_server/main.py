@@ -35,6 +35,7 @@ import torch
 from PIL import Image
 from fastapi import FastAPI, HTTPException, File, UploadFile, Form
 from fastapi.responses import Response, RedirectResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from model_loader import (
@@ -47,6 +48,13 @@ from model_loader import (
     _restore_sd_pipeline,
     _pbr_pipeline,
 )
+
+# 工作流模块
+from workflows.character_concept import CharacterConceptWorkflow
+from workflows.asset_generator import AssetGeneratorWorkflow
+from workflows.model_3d import Model3DWorkflow
+from workflows.pbr_material import PBRMaterialWorkflow
+from prompts.engine import get_prompt_engine
 
 
 # ===== 常量 =====
@@ -98,6 +106,32 @@ app = FastAPI(
 )
 
 _start_time: float | None = None
+
+# ===== 工作流注册表 =====
+_prompt_engine = get_prompt_engine()
+_workflow_registry: dict[str, object] = {}  # workflow_id → workflow instance
+
+
+def _init_workflows():
+    """初始化所有工作流实例（懒初始化，首次访问时调用）。"""
+    global _workflow_registry
+    if _workflow_registry:
+        return
+    eng = _prompt_engine
+    _workflow_registry = {
+        "character_concept": CharacterConceptWorkflow(eng),
+        "asset_generator": AssetGeneratorWorkflow(eng),
+        "model_3d": Model3DWorkflow(eng),
+        "pbr_material": PBRMaterialWorkflow(eng),
+    }
+    print(f"[workflows] 已注册 {len(_workflow_registry)} 个工作流", flush=True)
+
+
+# ===== 挂载 Web 演示界面静态文件 =====
+_WEB_UI_DIR = Path(__file__).parent / "web_ui"
+if _WEB_UI_DIR.exists():
+    app.mount("/workflow-ui", StaticFiles(directory=str(_WEB_UI_DIR), html=True), name="workflow_ui")
+    print(f"[workflows] Web UI 已挂载: http://127.0.0.1:8000/workflow-ui/", flush=True)
 
 
 # ===== 预处理函数 =====
@@ -214,6 +248,38 @@ PREPROCESSORS = {
 
 # ===== 启动事件 =====
 
+# ===== 422 错误日志中间件（排查表单验证问题） =====
+from fastapi.exceptions import RequestValidationError
+from fastapi import Request
+
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    """422 错误时打印详细日志，帮助定位是哪个字段验证失败。"""
+    body = None
+    try:
+        body = await request.form()
+        print(f"\n[422] 表单验证失败 — {request.method} {request.url.path}", flush=True)
+        print(f"[422] 收到的字段: {list(body.keys())}", flush=True)
+        for key, value in body.items():
+            val_str = str(value)
+            if len(val_str) > 200:
+                val_str = val_str[:200] + f"... ({len(val_str)} chars)"
+            print(f"  {key} = {val_str}", flush=True)
+    except Exception:
+        pass
+
+    print(f"[422] 验证错误:", flush=True)
+    for error in exc.errors():
+        print(f"  - {'.'.join(str(loc) for loc in error['loc'])}: {error['msg']}", flush=True)
+
+    # 返回标准 FastAPI 422 响应
+    from fastapi.responses import JSONResponse
+    return JSONResponse(
+        status_code=422,
+        content={"detail": exc.errors()},
+    )
+
+
 @app.on_event("startup")
 async def startup():
     """服务启动时加载模型（只加载一次，之后所有请求复用）。"""
@@ -231,6 +297,7 @@ async def startup():
     available = get_available_controlnet_modes()
     print(f"\n  服务已就绪 → http://127.0.0.1:8000", flush=True)
     print(f"  API 文档 → http://127.0.0.1:8000/docs", flush=True)
+    print(f"  工作流 Web UI → http://127.0.0.1:8000/workflow-ui/", flush=True)
     print(f"  ControlNet 可用: {available}", flush=True)
     print(f"  TripoSR 3D 生成: 首次使用自动下载（~1.68GB）", flush=True)
     print(f"  StableMaterials PBR 材质: 首次使用自动下载（~2-3GB）", flush=True)
@@ -751,6 +818,190 @@ async def health():
 @app.get("/")
 async def root():
     return RedirectResponse(url="/docs")
+
+
+# ===== 工作流 API =====
+
+@app.get("/workflows")
+async def list_workflows():
+    """
+    列出所有可用的游戏美术工作流及其参数说明。
+
+    返回每个工作流的 ID、名称、描述、输入参数 schema。
+    Web UI 和 Unity 插件用这个接口动态生成表单。
+    """
+    _init_workflows()
+    workflows = _prompt_engine.list_workflows()
+    return {
+        "workflows": workflows,
+        "total": len(workflows),
+    }
+
+
+@app.post("/workflows/run")
+async def run_workflow(
+    workflow: str = Form(..., description="工作流 ID: character_concept / prop_icon / scene_mood / ui_elements"),
+    prompt: str = Form("", description="描述文字（英文，model_3d 可选）"),
+    seed: int | None = Form(None),
+    steps: int = Form(25, ge=10, le=100),
+    guidance_scale: float = Form(7.5, ge=1.0, le=20.0),
+    style_suffix: str = Form("", description="额外风格关键词"),
+    reference_image: UploadFile | None = File(None, description="参考图（可选，道具图标/UI元素）"),
+    mood: str = Form("", description="氛围选择（asset_generator 场景风格: magical/sunset/night/stormy/peaceful）"),
+    mode: str = Form("", description="生成模式（角色概念图: turnaround / individual）"),
+    style: str = Form("", description="素材风格（asset_generator: icon / scene / ui）"),
+    control_mode: str = Form("", description="ControlNet 模式（asset_generator: canny / scribble / depth）"),
+    control_strength: float = Form(0.85, ge=0.1, le=2.0, description="ControlNet 控制力度"),
+    resolution: int = Form(256, ge=128, le=512, description="3D Mesh 精度（model_3d: 128/256/512）"),
+    output_format: str = Form("glb", description="3D 输出格式（model_3d: glb/obj）"),
+    tileable: bool = Form(True, description="无缝平铺（pbr_material）"),
+    wide: bool = Form(True, description="宽幅构图（场景氛围图）"),
+    stitch_grid: bool = Form(True, description="拼接画板（角色概念图）"),
+    elements: str = Form("", description="UI 元素列表 JSON 数组（ui_elements）"),
+    variants: int = Form(1, ge=1, le=4, description="生成变体数量（场景氛围图）"),
+    remove_bg: bool = Form(True, description="去背景（道具图标）"),
+):
+    """
+    执行一个游戏美术工作流。
+
+    - **workflow**: 必选，工作流 ID
+    - **prompt**: 必选，描述文字
+    - **seed**: 可选，随机种子
+    - **steps**: 步数，默认 25
+    - **guidance_scale**: 引导强度，默认 7.5
+
+    工作流特定参数通过 params 字段传递：
+    - character_concept: stitch_grid
+    - prop_icon: reference_image, remove_bg
+    - scene_mood: mood, wide, variants
+    - ui_elements: reference_image, elements
+    """
+    import json
+
+    _init_workflows()
+
+    if workflow not in _workflow_registry:
+        available = list(_workflow_registry.keys())
+        raise HTTPException(
+            status_code=400,
+            detail=f"未知工作流: '{workflow}'。可用: {available}"
+        )
+
+    # 读取可选的参考图
+    ref_bytes = None
+    if reference_image is not None:
+        try:
+            ref_bytes = await reference_image.read()
+        except Exception:
+            raise HTTPException(status_code=400, detail="无法读取参考图。")
+
+    # 解析 elements JSON
+    elements_list = None
+    if elements:
+        try:
+            elements_list = json.loads(elements)
+        except json.JSONDecodeError:
+            raise HTTPException(status_code=400, detail="elements 参数格式错误，应为 JSON 数组。")
+
+    # 构建参数
+    params = {
+        "prompt": prompt.strip(),
+        "seed": seed,
+        "steps": steps,
+        "guidance_scale": guidance_scale,
+        "style_suffix": style_suffix.strip() or "",
+        "reference_image": ref_bytes,
+        "mood": mood.strip() or "",
+        "mode": mode.strip() or "",
+        "style": style.strip() or "",
+        "control_mode": control_mode.strip() or "",
+        "control_strength": control_strength,
+        "resolution": resolution,
+        "output_format": output_format.strip() or "glb",
+        "tileable": tileable,
+        "wide": wide,
+        "stitch_grid": stitch_grid,
+        "remove_bg": remove_bg,
+        "variants": variants,
+    }
+    if elements_list is not None:
+        params["elements"] = elements_list
+
+    # 执行工作流
+    print(f"\n[workflows/run] workflow={workflow}, prompt={prompt[:80]}...", flush=True)
+
+    try:
+        wf = _workflow_registry[workflow]
+        result = wf.generate(params)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except torch.cuda.OutOfMemoryError:
+        raise HTTPException(status_code=500, detail="GPU 显存不足，请降低 steps 后重试。")
+    except Exception as e:
+        import traceback
+        print(f"[workflows/run] 错误: {traceback.format_exc()}", flush=True)
+        raise HTTPException(status_code=500, detail=f"工作流执行失败: {str(e)}")
+
+    metadata = result.get("metadata", {})
+    output_format = result.get("format", "png")
+
+    if output_format == "zip":
+        # 返回 ZIP（PBR 材质 / UI 元素）
+        zip_data = result.get("zip_data", b"")
+        return Response(
+            content=zip_data,
+            media_type="application/zip",
+            headers={
+                "X-Seed": str(metadata.get("seed", "")),
+                "X-Workflow": workflow,
+                "X-Element-Count": str(metadata.get("element_count", 0)),
+                "X-Tileable": str(metadata.get("tileable", "")),
+            },
+        )
+    elif output_format in ("glb", "obj"):
+        # 返回 3D 模型二进制（GLB 或 OBJ）
+        model_data = result.get("model_data", b"")
+        if not model_data:
+            raise HTTPException(status_code=500, detail="3D 模型生成失败，未产生模型数据。")
+
+        media_type = result.get("media_type", "model/gltf-binary")
+        ext = output_format
+        return Response(
+            content=model_data,
+            media_type=media_type,
+            headers={
+                "X-Seed": str(metadata.get("seed", "")),
+                "X-Workflow": workflow,
+                "X-Vertices": str(metadata.get("vertices", 0)),
+                "X-Faces": str(metadata.get("faces", 0)),
+                "X-Format": ext,
+                "X-Filename": f"model_{metadata.get('seed', '')}.{ext}",
+                "Content-Disposition": (
+                    f"attachment; filename=model_{metadata.get('seed', '')}.{ext}"
+                ),
+            },
+        )
+    else:
+        # 返回 PNG（优先返回 composite）
+        output_img = result.get("composite") or (
+            result["images"][0] if result.get("images") else None
+        )
+        if output_img is None:
+            raise HTTPException(status_code=500, detail="工作流未产生任何输出图片。")
+
+        img_bytes = io.BytesIO()
+        output_img.save(img_bytes, format="PNG")
+        img_bytes.seek(0)
+
+        return Response(
+            content=img_bytes.getvalue(),
+            media_type="image/png",
+            headers={
+                "X-Seed": str(metadata.get("seed", "")),
+                "X-Workflow": workflow,
+                "X-Mood": str(metadata.get("mood", "")),
+            },
+        )
 
 
 # ===== 关闭事件 =====

@@ -1,0 +1,790 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AIGC Game Art Workflows</title>
+<style>
+  /* ===== Reset & Base ===== */
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    --bg-primary: #0d1117;
+    --bg-card: #161b22;
+    --bg-hover: #1c2333;
+    --border: #30363d;
+    --text-primary: #e6edf3;
+    --text-secondary: #8b949e;
+    --accent: #58a6ff;
+    --accent-hover: #79c0ff;
+    --green: #3fb950;
+    --red: #f85149;
+    --orange: #d2991d;
+    --purple: #a371f7;
+    --pink: #db61a2;
+    --radius: 8px;
+    --shadow: 0 4px 24px rgba(0,0,0,0.4);
+  }
+
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+    background: var(--bg-primary);
+    color: var(--text-primary);
+    min-height: 100vh;
+    line-height: 1.6;
+  }
+
+  /* ===== Header ===== */
+  .header {
+    background: var(--bg-card);
+    border-bottom: 1px solid var(--border);
+    padding: 16px 24px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 12px;
+  }
+  .header h1 {
+    font-size: 1.4rem;
+    font-weight: 700;
+    background: linear-gradient(135deg, var(--accent), var(--purple));
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+  }
+  .header .subtitle { color: var(--text-secondary); font-size: 0.85rem; }
+  .header-links { display: flex; gap: 12px; }
+  .header-links a {
+    color: var(--text-secondary);
+    text-decoration: none;
+    font-size: 0.85rem;
+    padding: 6px 12px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    transition: all .2s;
+  }
+  .header-links a:hover { color: var(--accent); border-color: var(--accent); }
+  .server-status { display: flex; align-items: center; gap: 6px; font-size: 0.85rem; }
+  .status-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
+  .status-dot.online { background: var(--green); box-shadow: 0 0 6px var(--green); }
+  .status-dot.offline { background: var(--red); }
+
+  /* ===== Main Container ===== */
+  .container { max-width: 1100px; margin: 0 auto; padding: 32px 24px; }
+
+  /* ===== Workflow Cards ===== */
+  .section-title { font-size: 1.1rem; margin-bottom: 20px; color: var(--text-secondary); }
+
+  .workflow-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+    gap: 20px;
+  }
+
+  .wf-card {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 24px;
+    cursor: pointer;
+    transition: all .25s;
+    position: relative;
+    overflow: hidden;
+  }
+  .wf-card:hover {
+    background: var(--bg-hover);
+    border-color: var(--accent);
+    transform: translateY(-2px);
+    box-shadow: var(--shadow);
+  }
+  .wf-card .wf-icon { font-size: 2rem; margin-bottom: 12px; display: block; }
+  .wf-card .wf-name { font-size: 1.05rem; font-weight: 600; margin-bottom: 6px; }
+  .wf-card .wf-name-en { font-size: 0.8rem; color: var(--text-secondary); margin-bottom: 10px; }
+  .wf-card .wf-desc { font-size: 0.85rem; color: var(--text-secondary); line-height: 1.5; }
+  .wf-card .wf-badge {
+    position: absolute; top: 16px; right: 16px;
+    font-size: 0.7rem;
+    background: rgba(88,166,255,0.15);
+    color: var(--accent);
+    padding: 2px 8px;
+    border-radius: 12px;
+  }
+
+  /* ===== Modal/Dialog ===== */
+  .modal-overlay {
+    display: none;
+    position: fixed; inset: 0;
+    background: rgba(0,0,0,0.6);
+    z-index: 100;
+    align-items: center; justify-content: center;
+    padding: 20px;
+  }
+  .modal-overlay.active { display: flex; }
+
+  .modal {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    width: 100%; max-width: 560px;
+    max-height: 90vh;
+    overflow-y: auto;
+    box-shadow: var(--shadow);
+  }
+  .modal-header {
+    padding: 20px 24px;
+    border-bottom: 1px solid var(--border);
+    display: flex; align-items: center; justify-content: space-between;
+  }
+  .modal-header h2 { font-size: 1.2rem; display: flex; align-items: center; gap: 10px; }
+  .modal-close {
+    background: none; border: none; color: var(--text-secondary);
+    font-size: 1.5rem; cursor: pointer; padding: 4px 8px;
+  }
+  .modal-close:hover { color: var(--text-primary); }
+  .modal-body { padding: 24px; }
+  .modal-footer { padding: 16px 24px; border-top: 1px solid var(--border); display: flex; gap: 12px; }
+
+  /* ===== Form Elements ===== */
+  .form-group { margin-bottom: 18px; }
+  .form-group label {
+    display: block; font-size: 0.85rem; font-weight: 500;
+    margin-bottom: 6px; color: var(--text-primary);
+  }
+  .form-group .hint { font-size: 0.75rem; color: var(--text-secondary); margin-top: 4px; }
+
+  input[type="text"], textarea, select {
+    width: 100%;
+    padding: 10px 12px;
+    background: var(--bg-primary);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    color: var(--text-primary);
+    font-size: 0.9rem;
+    font-family: inherit;
+    transition: border-color .2s;
+  }
+  input:focus, textarea:focus, select:focus {
+    outline: none;
+    border-color: var(--accent);
+  }
+  textarea { resize: vertical; min-height: 80px; }
+
+  .drop-zone {
+    border: 2px dashed var(--border);
+    border-radius: var(--radius);
+    padding: 32px;
+    text-align: center;
+    color: var(--text-secondary);
+    cursor: pointer;
+    transition: all .2s;
+    background: var(--bg-primary);
+    font-size: 0.9rem;
+  }
+  .drop-zone:hover, .drop-zone.dragover {
+    border-color: var(--accent);
+    color: var(--accent);
+    background: rgba(88,166,255,0.05);
+  }
+  .drop-zone.has-file { border-color: var(--green); color: var(--green); }
+  .drop-zone input[type="file"] { display: none; }
+
+  .checkbox-group { display: flex; flex-wrap: wrap; gap: 10px; }
+  .checkbox-group label {
+    display: flex; align-items: center; gap: 6px;
+    padding: 6px 12px;
+    border: 1px solid var(--border);
+    border-radius: 20px;
+    font-size: 0.8rem;
+    cursor: pointer;
+    transition: all .2s;
+    user-select: none;
+  }
+  .checkbox-group label:hover { border-color: var(--accent); }
+  .checkbox-group input:checked + span { color: var(--accent); }
+  .checkbox-group label:has(input:checked) {
+    border-color: var(--accent);
+    background: rgba(88,166,255,0.1);
+  }
+
+  .range-group { display: flex; align-items: center; gap: 12px; }
+  .range-group input[type="range"] { flex: 1; accent-color: var(--accent); }
+  .range-group .range-val { font-size: 0.9rem; font-weight: 600; min-width: 36px; color: var(--accent); }
+
+  /* ===== Buttons ===== */
+  .btn {
+    padding: 10px 24px;
+    border: none; border-radius: var(--radius);
+    font-size: 0.9rem; font-weight: 600;
+    cursor: pointer;
+    transition: all .2s;
+    font-family: inherit;
+  }
+  .btn-primary {
+    background: var(--accent);
+    color: #fff;
+    flex: 1;
+  }
+  .btn-primary:hover { background: var(--accent-hover); }
+  .btn-primary:disabled { opacity: 0.5; cursor: not-allowed; }
+  .btn-secondary {
+    background: var(--bg-primary);
+    color: var(--text-primary);
+    border: 1px solid var(--border);
+  }
+  .btn-secondary:hover { border-color: var(--text-secondary); }
+  .btn-back {
+    display: inline-flex; align-items: center; gap: 6px;
+    color: var(--text-secondary);
+    text-decoration: none;
+    font-size: 0.85rem;
+    margin-bottom: 24px;
+    transition: color .2s;
+  }
+  .btn-back:hover { color: var(--accent); }
+
+  /* ===== Result Panel ===== */
+  .result-panel {
+    display: none;
+    margin-top: 24px;
+    padding: 24px;
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+  }
+  .result-panel.active { display: block; }
+
+  .result-panel h3 { font-size: 1rem; margin-bottom: 16px; color: var(--green); }
+  .result-image {
+    max-width: 100%;
+    border-radius: var(--radius);
+    border: 1px solid var(--border);
+    cursor: pointer;
+    transition: transform .2s;
+  }
+  .result-image:hover { transform: scale(1.02); }
+  .result-meta { font-size: 0.8rem; color: var(--text-secondary); margin-top: 12px; }
+  .result-actions { display: flex; gap: 10px; margin-top: 16px; flex-wrap: wrap; }
+
+  /* ===== Loading ===== */
+  .loading-spinner {
+    display: inline-block;
+    width: 20px; height: 20px;
+    border: 2px solid rgba(255,255,255,0.2);
+    border-top-color: #fff;
+    border-radius: 50%;
+    animation: spin .8s linear infinite;
+    vertical-align: middle;
+    margin-right: 8px;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .loading-text { color: var(--text-secondary); font-size: 0.9rem; }
+  .progress-bar {
+    height: 4px;
+    background: var(--border);
+    border-radius: 2px;
+    margin-top: 16px;
+    overflow: hidden;
+  }
+  .progress-bar .fill {
+    height: 100%;
+    background: linear-gradient(90deg, var(--accent), var(--purple));
+    border-radius: 2px;
+    animation: progress 2s ease-in-out infinite;
+  }
+  @keyframes progress {
+    0% { width: 10%; }
+    50% { width: 70%; }
+    100% { width: 100%; }
+  }
+
+  .error-banner {
+    padding: 12px 16px;
+    background: rgba(248,81,73,0.1);
+    border: 1px solid var(--red);
+    border-radius: var(--radius);
+    color: var(--red);
+    font-size: 0.85rem;
+    margin-top: 16px;
+  }
+
+  /* ===== Image Lightbox ===== */
+  .lightbox {
+    display: none;
+    position: fixed; inset: 0;
+    background: rgba(0,0,0,0.9);
+    z-index: 200;
+    align-items: center; justify-content: center;
+    cursor: pointer;
+  }
+  .lightbox.active { display: flex; }
+  .lightbox img { max-width: 90vw; max-height: 90vh; border-radius: 4px; }
+
+  /* ===== Mood Selector ===== */
+  .mood-selector { display: flex; gap: 8px; flex-wrap: wrap; }
+  .mood-option {
+    padding: 8px 16px;
+    border: 1px solid var(--border);
+    border-radius: 20px;
+    cursor: pointer;
+    font-size: 0.85rem;
+    transition: all .2s;
+    user-select: none;
+  }
+  .mood-option:hover { border-color: var(--accent); }
+  .mood-option.selected {
+    border-color: var(--accent);
+    background: rgba(88,166,255,0.15);
+    color: var(--accent);
+  }
+
+  /* ===== Responsive ===== */
+  @media (max-width: 640px) {
+    .workflow-grid { grid-template-columns: 1fr; }
+    .header { flex-direction: column; align-items: flex-start; }
+    .container { padding: 16px; }
+    .modal { max-width: 100%; border-radius: 0; }
+  }
+</style>
+</head>
+<body>
+
+<!-- ===== Header ===== -->
+<header class="header">
+  <div>
+    <h1>🎮 AIGC Game Art Workflows</h1>
+    <p class="subtitle">AI 驱动的游戏美术生产线 — 选工作流 → 输入描述 → 生成资产</p>
+  </div>
+  <div style="display:flex;align-items:center;gap:16px;">
+    <span class="server-status">
+      <span class="status-dot" id="statusDot"></span>
+      <span id="statusText">检测中...</span>
+    </span>
+    <div class="header-links">
+      <a href="/docs" target="_blank">📖 API 文档</a>
+      <a href="#" onclick="checkHealth()">🔄 重检</a>
+    </div>
+  </div>
+</header>
+
+<!-- ===== Main Content ===== -->
+<main class="container">
+  <!-- Workflow Grid -->
+  <div id="homeView">
+    <p class="section-title">选择工作流开始生成：</p>
+    <div class="workflow-grid" id="workflowGrid">
+      <!-- Card placeholders (filled by JS) -->
+      <div class="wf-card" style="text-align:center;color:var(--text-secondary);padding:40px;">
+        <div class="loading-spinner"></div>
+        <p style="margin-top:12px;">加载工作流列表...</p>
+      </div>
+    </div>
+  </div>
+
+  <!-- Result Panel (hidden by default) -->
+  <div class="result-panel" id="resultPanel">
+    <h3>✅ 生成完成</h3>
+    <img id="resultImage" class="result-image" alt="Result" onclick="openLightbox(this.src)">
+    <p class="result-meta" id="resultMeta"></p>
+    <div class="result-actions">
+      <a id="downloadLink" class="btn btn-primary" download>💾 下载图片</a>
+      <button class="btn btn-secondary" onclick="document.getElementById('resultPanel').classList.remove('active')">关闭</button>
+    </div>
+  </div>
+
+  <!-- Error banner -->
+  <div class="error-banner" id="errorBanner" style="display:none;"></div>
+</main>
+
+<!-- ===== Modal ===== -->
+<div class="modal-overlay" id="modalOverlay">
+  <div class="modal">
+    <div class="modal-header">
+      <h2><span id="modalIcon"></span> <span id="modalTitle"></span></h2>
+      <button class="modal-close" onclick="closeModal()">✕</button>
+    </div>
+    <div class="modal-body" id="modalBody">
+      <!-- Dynamic content rendered by JS -->
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-secondary" onclick="closeModal()">取消</button>
+      <button class="btn btn-primary" id="modalGenerateBtn" onclick="executeWorkflow()">
+        🚀 生成 (Generate)
+      </button>
+    </div>
+  </div>
+</div>
+
+<!-- ===== Lightbox ===== -->
+<div class="lightbox" id="lightbox" onclick="closeLightbox()">
+  <img id="lightboxImg" alt="Full size">
+</div>
+
+<script>
+// ===== App State =====
+let workflows = [];
+let currentWorkflow = null;
+let referenceFile = null;
+
+// ===== Init =====
+document.addEventListener('DOMContentLoaded', () => {
+  checkHealth();
+  loadWorkflows();
+});
+
+// ===== Health Check =====
+async function checkHealth() {
+  const dot = document.getElementById('statusDot');
+  const text = document.getElementById('statusText');
+  dot.className = 'status-dot';
+  text.textContent = '检测中...';
+  try {
+    const resp = await fetch('/health');
+    if (resp.ok) {
+      const data = await resp.json();
+      dot.classList.add('online');
+      text.textContent = `在线 — ${data.device || 'GPU'}`;
+      return true;
+    }
+  } catch(e) {}
+  dot.classList.add('offline');
+  text.textContent = '离线';
+  return false;
+}
+
+// ===== Load Workflows =====
+async function loadWorkflows() {
+  try {
+    const resp = await fetch('/workflows');
+    if (!resp.ok) throw new Error('Failed to fetch');
+    const data = await resp.json();
+    workflows = data.workflows || [];
+    renderWorkflowCards();
+  } catch(e) {
+    document.getElementById('workflowGrid').innerHTML = `
+      <div style="color:var(--red);padding:20px;text-align:center;grid-column:1/-1;">
+        ⚠️ 无法加载工作流列表。请确认推理服务已启动。
+      </div>`;
+  }
+}
+
+// ===== Render Cards =====
+function renderWorkflowCards() {
+  const grid = document.getElementById('workflowGrid');
+  if (!workflows.length) {
+    grid.innerHTML = '<p style="color:var(--text-secondary);grid-column:1/-1;">暂无可用工作流</p>';
+    return;
+  }
+  grid.innerHTML = workflows.map(wf => `
+    <div class="wf-card" onclick="openWorkflow('${wf.id}')">
+      <span class="wf-badge">${wf.available ? '就绪' : '离线'}</span>
+      <span class="wf-icon">${wf.icon || '🎯'}</span>
+      <div class="wf-name">${wf.name}</div>
+      <div class="wf-name-en">${wf.name_en || ''}</div>
+      <div class="wf-desc">${wf.description}</div>
+    </div>
+  `).join('');
+}
+
+// ===== Open Workflow Modal =====
+function openWorkflow(wfId) {
+  const wf = workflows.find(w => w.id === wfId);
+  if (!wf) return;
+  currentWorkflow = wf;
+
+  document.getElementById('modalIcon').textContent = wf.icon || '🎯';
+  document.getElementById('modalTitle').textContent = `${wf.name} (${wf.name_en || ''})`;
+  document.getElementById('modalBody').innerHTML = buildForm(wf);
+  document.getElementById('modalOverlay').classList.add('active');
+
+  // Re-focus first input
+  setTimeout(() => {
+    const firstInput = document.querySelector('#modalBody input[type="text"], #modalBody textarea');
+    if (firstInput) firstInput.focus();
+  }, 100);
+}
+
+function closeModal() {
+  document.getElementById('modalOverlay').classList.remove('active');
+  currentWorkflow = null;
+  referenceFile = null;
+}
+
+// ===== Build Dynamic Form =====
+function buildForm(wf) {
+  if (!wf.input_schema) return '<p>无参数配置</p>';
+
+  const schema = wf.input_schema;
+  let html = '';
+
+  for (const [key, field] of Object.entries(schema)) {
+    html += '<div class="form-group">';
+    html += `<label>${field.label || key} ${field.required ? '<span style="color:var(--red)">*</span>' : ''}</label>`;
+
+    switch (field.type) {
+      case 'text':
+        html += `<textarea id="field_${key}" placeholder="${field.placeholder || ''}" rows="3">${field.default || ''}</textarea>`;
+        break;
+      case 'image':
+        html += `
+          <div class="drop-zone" id="drop_${key}" onclick="this.querySelector('input').click()">
+            <input type="file" accept="image/*" onchange="handleFileDrop(event, 'drop_${key}')">
+            <p>📁 ${field.label || '拖入参考图'}<br><small>${field.placeholder || '支持 PNG/JPG'}</small></p>
+          </div>`;
+        break;
+      case 'select':
+        html += buildMoodSelector(key, field);
+        break;
+      case 'multiselect':
+        html += buildMultiSelect(key, field);
+        break;
+      case 'boolean':
+        html += `<label style="display:flex;align-items:center;gap:8px;cursor:pointer;">
+          <input type="checkbox" id="field_${key}" ${field.default !== false ? 'checked' : ''}>
+          <span>${field.label}</span>
+        </label>`;
+        break;
+      default:
+        html += `<input type="text" id="field_${key}" placeholder="${field.placeholder || ''}" value="${field.default || ''}">`;
+    }
+
+    if (field.placeholder && field.type !== 'text' && field.type !== 'image') {
+      html += `<p class="hint">${field.placeholder}</p>`;
+    }
+    html += '</div>';
+  }
+
+  // Hidden field for workflow ID
+  html += `<input type="hidden" id="field_workflow" value="${wf.id}">`;
+
+  return html;
+}
+
+function buildMoodSelector(key, field) {
+  if (!field.options) return '';
+  let html = `<input type="hidden" id="field_${key}" value="${field.default || field.options[0]?.value || ''}">`;
+  html += '<div class="mood-selector">';
+  for (const opt of field.options) {
+    const selected = opt.value === (field.default || field.options[0]?.value);
+    html += `<div class="mood-option${selected ? ' selected' : ''}"
+      data-value="${opt.value}"
+      onclick="selectMood(this, 'field_${key}')">${opt.label}</div>`;
+  }
+  html += '</div>';
+  return html;
+}
+
+function selectMood(el, fieldId) {
+  el.parentElement.querySelectorAll('.mood-option').forEach(o => o.classList.remove('selected'));
+  el.classList.add('selected');
+  document.getElementById(fieldId).value = el.dataset.value;
+}
+
+function buildMultiSelect(key, field) {
+  if (!field.options) return '';
+  const defaults = field.default || [];
+  let html = `<div class="checkbox-group" id="group_${key}">`;
+  for (const opt of field.options) {
+    const checked = defaults.includes(opt.value);
+    html += `<label><input type="checkbox" value="${opt.value}" ${checked ? 'checked' : ''}><span>${opt.label}</span></label>`;
+  }
+  html += '</div>';
+  return html;
+}
+
+// ===== File Drop Handler =====
+function handleFileDrop(event, dropId) {
+  const file = event.target.files?.[0];
+  const dropZone = document.getElementById(dropId);
+  if (!file) return;
+
+  referenceFile = file;
+  dropZone.classList.add('has-file');
+  dropZone.querySelector('p').innerHTML = `✅ ${file.name}<br><small>${(file.size/1024).toFixed(0)} KB</small>`;
+}
+
+// ===== Execute Workflow =====
+async function executeWorkflow() {
+  if (!currentWorkflow) return;
+
+  const wfId = currentWorkflow.id;
+  const schema = currentWorkflow.input_schema || {};
+
+  // Build form data
+  const formData = new FormData();
+  formData.append('workflow', wfId);
+
+  for (const [key, field] of Object.entries(schema)) {
+    if (field.type === 'image') {
+      if (referenceFile) {
+        formData.append('reference_image', referenceFile);
+      }
+      continue;
+    }
+
+    const el = document.getElementById(`field_${key}`);
+    if (!el) continue;
+
+    if (field.type === 'multiselect') {
+      const checked = [];
+      el.parentElement.querySelectorAll('input:checked').forEach(cb => checked.push(cb.value));
+      formData.append('elements', JSON.stringify(checked));
+    } else if (field.type === 'boolean') {
+      formData.append(key, el.checked ? 'true' : 'false');
+    } else {
+      formData.append(key, el.value || '');
+    }
+  }
+
+  // Also append common fields
+  const stepsEl = document.getElementById('field_steps');
+  const cfgEl = document.getElementById('field_guidance_scale');
+
+  // UI feedback
+  const genBtn = document.getElementById('modalGenerateBtn');
+  genBtn.disabled = true;
+  genBtn.innerHTML = '<span class="loading-spinner"></span> 生成中...';
+
+  // Show progress in modal
+  const modalBody = document.getElementById('modalBody');
+  const progressHTML = `
+    <div class="progress-bar"><div class="fill"></div></div>
+    <p class="loading-text" style="text-align:center;margin-top:16px;">
+      正在生成，请耐心等待（通常 5~30 秒）...
+    </p>`;
+  modalBody.insertAdjacentHTML('beforeend', progressHTML);
+
+  // Debug: 打印发送的表单数据（按 F12 打开控制台查看）
+  const debugInfo = [];
+  for (const [k, v] of formData.entries()) {
+    debugInfo.push(`${k}=${v instanceof File ? `[FILE:${v.name} ${(v.size/1024).toFixed(0)}KB]` : String(v).slice(0, 60)}`);
+  }
+  console.log('[workflow] POST /workflows/run 发送的字段:', debugInfo);
+
+  try {
+    const resp = await fetch('/workflows/run', {
+      method: 'POST',
+      body: formData,
+    });
+
+    // Remove progress
+    modalBody.querySelector('.progress-bar')?.parentElement?.remove();
+
+    if (!resp.ok) {
+      let errMsg = `HTTP ${resp.status}`;
+      try {
+        const err = await resp.json();
+        if (err.detail) {
+          if (Array.isArray(err.detail)) {
+            // FastAPI 422: 列出所有字段验证错误
+            errMsg = err.detail.map(e =>
+              `${e.loc?.join('.')}: ${e.msg}`
+            ).join('; ');
+          } else {
+            errMsg = err.detail;
+          }
+        }
+      } catch {}
+      throw new Error(errMsg);
+    }
+
+    // Determine output type
+    const contentType = resp.headers.get('content-type') || '';
+
+    if (contentType.includes('application/zip')) {
+      // ZIP download (PBR / UI elements)
+      const blob = await resp.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `${currentWorkflow.id}_${Date.now()}.zip`;
+      a.click();
+      URL.revokeObjectURL(url);
+
+      modalBody.innerHTML += `
+        <div style="padding:20px;text-align:center;color:var(--green);margin-top:12px;">
+          ✅ ZIP 下载已开始！含 ${resp.headers.get('X-Element-Count') || '多个'} 个文件
+        </div>`;
+    } else if (contentType.includes('model/gltf') || contentType.includes('model/obj')) {
+      // 3D model download (GLB or OBJ)
+      const blob = await resp.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+
+      const filename = resp.headers.get('X-Filename') || `model_${Date.now()}.glb`;
+      const fmt = resp.headers.get('X-Format') || 'glb';
+      a.download = filename;
+      a.click();
+      URL.revokeObjectURL(url);
+
+      const verts = resp.headers.get('X-Vertices') || '?';
+      const faces = resp.headers.get('X-Faces') || '?';
+      modalBody.innerHTML += `
+        <div style="padding:20px;text-align:center;color:var(--green);margin-top:12px;">
+          ✅ 3D 模型下载已开始！(.${fmt.toUpperCase()})<br>
+          <small>${verts} 顶点, ${faces} 面 — ${fmt === 'obj' ? 'Unity 原生支持，可直接导入' : '需装 glTFast 插件'}</small>
+        </div>`;
+    } else {
+      // PNG result (角色概念/道具图标/场景氛围)
+      const blob = await resp.blob();
+      const url = URL.createObjectURL(blob);
+      showResult(url, resp.headers);
+    }
+  } catch(e) {
+    const errBanner = document.getElementById('errorBanner');
+    errBanner.textContent = `❌ 生成失败: ${e.message}`;
+    errBanner.style.display = 'block';
+    setTimeout(() => { errBanner.style.display = 'none'; }, 10000);
+    console.error(e);
+  } finally {
+    genBtn.disabled = false;
+    genBtn.innerHTML = '🚀 生成 (Generate)';
+    closeModal();
+  }
+}
+
+// ===== Show Result =====
+function showResult(imageUrl, headers) {
+  const panel = document.getElementById('resultPanel');
+  const img = document.getElementById('resultImage');
+  const meta = document.getElementById('resultMeta');
+  const dl = document.getElementById('downloadLink');
+
+  img.src = imageUrl;
+  dl.href = imageUrl;
+
+  const seed = headers.get('X-Seed') || '?';
+  const wf = headers.get('X-Workflow') || '?';
+  const mood = headers.get('X-Mood') || '';
+  dl.download = `${wf}_seed${seed}.png`;
+
+  meta.textContent = `工作流: ${wf} | 种子: ${seed}${mood ? ' | 氛围: ' + mood : ''}`;
+  panel.classList.add('active');
+  panel.scrollIntoView({ behavior: 'smooth' });
+}
+
+// ===== Lightbox =====
+function openLightbox(src) {
+  document.getElementById('lightboxImg').src = src;
+  document.getElementById('lightbox').classList.add('active');
+}
+function closeLightbox() {
+  document.getElementById('lightbox').classList.remove('active');
+}
+
+// ===== Keyboard =====
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') {
+    closeLightbox();
+    closeModal();
+  }
+});
+
+// ===== Click outside modal to close =====
+document.getElementById('modalOverlay').addEventListener('click', (e) => {
+  if (e.target === e.currentTarget) closeModal();
+});
+</script>
+</body>
+</html>

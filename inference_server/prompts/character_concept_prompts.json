@@ -1,0 +1,14 @@
+{
+  "_description": "角色概念图 — 转身图：单次生成含多角度的角色参考画板",
+  "style_suffix": "game character concept art, high quality, detailed, masterpiece, best quality",
+  "negative_prompt": "lowres, bad anatomy, bad hands, text, error, extra digit, fewer digits, cropped, worst quality, low quality, normal quality, jpeg artifacts, signature, watermark, blurry, ugly, deformed, distorted body, bad proportions, extra limbs, fused limbs, too many fingers, disfigured, mutated, doll, plastic, 3D render, photo, realistic",
+
+  "turnaround": {
+    "template": "character turnaround sheet, character reference sheet, {prompt}, multiple views of the same character, front view, side view, back view, three quarter view, full body, standing, white background, reference sheet, character design sheet, same character in all views, consistent design, detailed character reference, {style_suffix}",
+    "negative": "different characters, inconsistent design, merged views, overlapping views, cropped views, missing views, out of frame, close-up, portrait, face only, upper body only, messy layout, text labels, watermark",
+    "width": 1024,
+    "height": 576,
+    "guidance_scale": 8.5,
+    "steps_hint": 30
+  }
+}
