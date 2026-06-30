@@ -1,0 +1,10 @@
+# ComfyUI extra model paths
+# Points to our existing AIGC project model cache
+
+aigc_models:
+    base_path: d:\aigc-project\ComfyUI\models
+    checkpoints: checkpoints
+    loras: loras
+    controlnet: controlnet
+    vae: vae
+    diffusers: diffusers

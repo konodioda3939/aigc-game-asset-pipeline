@@ -1,0 +1,107 @@
+{
+  "1": {
+    "class_type": "DiffusersLoader",
+    "inputs": {
+      "model_path": "Counterfeit-V2.5"
+    },
+    "_meta": {
+      "title": "Load Counterfeit-V2.5"
+    }
+  },
+  "2": {
+    "class_type": "CLIPTextEncode",
+    "inputs": {
+      "text": "{prompt}, game icon, centered composition, clean design, isolated, high contrast, polished, vibrant colors, simple shapes, game asset, masterpiece, best quality",
+      "clip": [
+        "1",
+        1
+      ]
+    },
+    "_meta": {
+      "title": "Positive (edit prompt here)"
+    }
+  },
+  "3": {
+    "class_type": "CLIPTextEncode",
+    "inputs": {
+      "text": "realistic, photo, 3D render, complex background, cluttered, lowres, worst quality, blurry, ugly, jpeg artifacts, signature, watermark",
+      "clip": [
+        "1",
+        1
+      ]
+    },
+    "_meta": {
+      "title": "Negative Prompt"
+    }
+  },
+  "4": {
+    "class_type": "EmptyLatentImage",
+    "inputs": {
+      "width": 512,
+      "height": 512,
+      "batch_size": 1
+    },
+    "_meta": {
+      "title": "512x512 Latent"
+    }
+  },
+  "5": {
+    "class_type": "KSampler",
+    "inputs": {
+      "model": [
+        "1",
+        0
+      ],
+      "positive": [
+        "2",
+        0
+      ],
+      "negative": [
+        "3",
+        0
+      ],
+      "latent_image": [
+        "4",
+        0
+      ],
+      "seed": 1655978982,
+      "steps": 25,
+      "cfg": 7.5,
+      "sampler_name": "euler",
+      "scheduler": "normal",
+      "denoise": 1.0
+    },
+    "_meta": {
+      "title": "KSampler"
+    }
+  },
+  "6": {
+    "class_type": "VAEDecode",
+    "inputs": {
+      "samples": [
+        "5",
+        0
+      ],
+      "vae": [
+        "1",
+        2
+      ]
+    },
+    "_meta": {
+      "title": "VAE Decode"
+    }
+  },
+  "7": {
+    "class_type": "SaveImage",
+    "inputs": {
+      "filename_prefix": "AssetIcon",
+      "images": [
+        "6",
+        0
+      ]
+    },
+    "_meta": {
+      "title": "Save Image"
+    }
+  }
+}

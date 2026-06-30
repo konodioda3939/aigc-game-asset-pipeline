@@ -19,16 +19,18 @@
 | 里程碑5 | TripoSR 图片转 3D 模型（去背景 → 推理 → .glb → Unity Prefab） | ✅ |
 | 里程碑6 | StableMaterials PBR 材质生成（prompt → BaseColor/Normal/Roughness/Metallic → Unity Material） | ✅ |
 | 里程碑7 | 游戏美术工作流引擎（4 条标准化产线 → 一键切换 → 零新模型依赖） | ✅ |
+| 里程碑8 | ComfyUI 游戏美术工作流（4 套 .json 节点图 → API 调用 → 面试可演示） | ✅ |
 
 **已知局限：**
 
 | 问题 | 说明 |
 |------|------|
-| TripoSR 边界伪影（方壳） | 三平面表示的立方体边界噪声，尚无有效代码解决方案，后续换底模 |
+| ComfyUI PBR 首次加载慢 | StableMaterials 首次加载需 30-60 秒（下载/加载 2-3GB 权重），后续调用秒级 |
+| TripoSR 节点模型格式 | Flowty TripoSR 使用旧版 ViT 键名，HF 新版 checkpoint 可能需要键名转换 |
 | TripoSR 只擅长真实物体 | 训练数据为 Objaverse（真实 3D 扫描），二次元角色会崩 |
 | ControlNet 大图会慢 | SD 1.5 原生 512×512，超过 768 会自动缩放（8GB 显存限制） |
 | PBR 只擅长写实材质 | 训练数据为 MatSynth（真实 PBR），非风格化/动漫材质效果差 |
-| PBR 与 SD 不能同时加载 | 8GB 显存限制，自动卸载/恢复策略透明处理 |
+| PBR 与 SD 不能同时加载 | 8GB 显存限制，StableMaterials 节点按需加载，用完释放 |
 
 ---
 
@@ -382,6 +384,74 @@ inference_server/
 | HuggingFace 超时 | `HF_HUB_DOWNLOAD_TIMEOUT = '600'`（10 分钟） |
 | GitHub 推送 | **用 SSH**（`git@github.com:konodioda3939/aigc-game-asset-pipeline.git`），不用 HTTPS |
 | pip 安装 | 可用清华源 `-i https://pypi.tuna.tsinghua.edu.cn/simple` |
+
+---
+
+### ComfyUI 游戏美术工作流（里程碑 8）
+
+**目标**：把已有的 4 条 Python 工作流迁移到 ComfyUI 节点图，通过标准 API 调用。面试可演示。
+
+**与里程碑 7 的关系**：
+- 里程碑 7 是轻量级 Python 引擎（复用全局单例，零新依赖）
+- 里程碑 8 是标准 ComfyUI 工作流（行业标准工具，可视化节点图）
+- 两套系统**互不干扰**：ComfyUI 端口 8188，FastAPI 端口 8000
+
+**ComfyUI 安装信息**：
+- 位置：`d:\aigc-project\ComfyUI\`
+- 启动：双击 `ComfyUI/start_comfyui.bat` → 浏览器打开 `http://127.0.0.1:8188`
+- 端口：8188（不与 FastAPI 8000 冲突）
+- 启动参数：`--fp16-unet --fp16-vae --use-pytorch-cross-attention --reserve-vram 1.0`
+- 环境变量：`TQDM_DISABLE=1`（避免后台运行进度条报错）
+
+**模型路径**（全部复用已有缓存，不重复下载）：
+| 模型 | ComfyUI 路径 | 来源 |
+|------|-------------|------|
+| Counterfeit-V2.5 | `models/diffusers/Counterfeit-V2.5/` | HF 缓存复制 |
+| LoRA (原神风格) | `models/loras/CounterfeitGenshin-LoRA.safetensors` | PEFT 格式转换 |
+| ControlNet ×3 | `models/controlnet/control_v11p_sd15_*.safetensors` | HF 缓存复制 |
+| TripoSR | `models/checkpoints/TripoSR_model.ckpt` | HF 缓存复制 |
+
+**4 套工作流 JSON**（位于 `ComfyUI/workflows/`）：
+
+| 文件 | 工作流 | 核心节点 | 状态 |
+|------|--------|----------|------|
+| `character_concept.json` | 角色转身图 | DiffusersLoader → CLIPTextEncode → KSampler(1024×576, 30步) → VAEDecode | ✅ |
+| `asset_icon_text.json` | 游戏图标(文字) | DiffusersLoader → KSampler(512×512, 25步) → SaveImage | ✅ |
+| `model_3d.json` | 图片转3D | LoadImage → TripoSRModelLoader → TripoSRSampler → TripoSRViewer | ⚠️ 未测试 |
+| `pbr_material.json` | PBR材质 | StableMaterials(自定义节点) → SaveImage×5 | ✅ |
+
+**自定义节点**（位于 `ComfyUI/custom_nodes/`）：
+
+| 节点 | 来源 | 用途 |
+|------|------|------|
+| `ComfyUI-Flowty-TripoSR` | flowtyone (GitHub SSH) | TripoSR 图片→3D mesh |
+| `comfyui_remove_background` | d3cker (GitHub SSH) | rembg 去背景 |
+| `ComfyUI-StableMaterials` | **自己编写** | StableMaterials PBR 材质生成 |
+| `comfyui_controlnet_aux` | Fannovel16 (GitHub SSH) | ControlNet 预处理器(Canny/HED/Depth) |
+
+**API 调用方式**：
+```python
+# 提交工作流
+POST http://127.0.0.1:8188/prompt
+Body: {"prompt": <workflow_json>, "client_id": "..."}
+# 返回: {"prompt_id": "..."}
+
+# 查询结果
+GET http://127.0.0.1:8188/history/{prompt_id}
+
+# 下载图片
+GET http://127.0.0.1:8188/view?filename=...&type=output
+```
+
+**LoRA 转换**（`scripts/lora_convert.py`）：
+- PEFT 格式键名 `base_model.model.xxx.lora_A.weight` → ComfyUI 格式 `lora_unet_xxx.lora_down.weight`
+- 256 个权重键全部成功转换，输出 12.2MB
+- 在 ComfyUI 中使用 `LoraLoader` 节点，strength 推荐 0.7-1.0
+
+**已知问题**：
+- `RemoveBackground` 节点输出 MASK 而非 IMAGE，素材图标工作流暂不含去背景步骤
+- Flowty TripoSR 使用旧版 ViT 键名，HF 新版 checkpoint 可能需要键名转换（同 model_loader.py 的 `_remap_triposr_keys`）
+- StableMaterials 首次加载需 30-60 秒（2-3GB 权重），后续调用秒级
 
 ---
 

@@ -13,17 +13,17 @@
 
 ## 📖 这是什么？
 
-一个**从文字/草图到游戏资产**的 AI 管线，分七个阶段：
+一个**从文字/草图到游戏资产**的 AI 管线，分八个阶段：
 
 ```
-┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────┐
-│ 阶段 1    │─→│ 阶段 2    │─→│ 阶段 3    │─→│ 阶段 4    │─→│ 阶段 5    │─→│ 阶段 6    │─→│ 阶段 7    │
-│ LoRA 微调 │  │ Python   │  │ Unity    │  │ ControlNet│  │ TripoSR   │  │ PBR 材质  │  │ 工作流引擎 │
-│          │  │ API      │  │ 插件      │  │ 可控生成   │  │ 图片→3D   │  │ 自动生成   │  │ 4条产线   │
-│ 48张原神图│  │ FastAPI  │  │ 输入文字  │  │ 草图/线稿  │  │ 上传图片  │  │ 输入描述   │  │ 角色/图标  │
-│ →训练LoRA│  │ →PNG图片 │  │ →生成图片 │  │ →AI精修   │  │ →3D模型  │  │ →完整材质  │  │ 场景/UI   │
-│ →原神风格│  │          │  │ →导入资产 │  │ →保持结构  │  │ →Unity    │  │ →Unity.mat│  │ 一键切换   │
-└──────────┘  └──────────┘  └──────────┘  └──────────┘  └──────────┘  └──────────┘  └──────────┘
+┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────┐
+│ 阶段 1    │─→│ 阶段 2    │─→│ 阶段 3    │─→│ 阶段 4    │─→│ 阶段 5    │─→│ 阶段 6    │─→│ 阶段 7    │─→│ 阶段 8    │
+│ LoRA 微调 │  │ Python   │  │ Unity    │  │ ControlNet│  │ TripoSR   │  │ PBR 材质  │  │ 工作流引擎 │  │ ComfyUI  │
+│          │  │ API      │  │ 插件      │  │ 可控生成   │  │ 图片→3D   │  │ 自动生成   │  │ 4条产线   │  │ 节点图   │
+│ 48张原神图│  │ FastAPI  │  │ 输入文字  │  │ 草图/线稿  │  │ 上传图片  │  │ 输入描述   │  │ 角色/图标  │  │ 可视化   │
+│ →训练LoRA│  │ →PNG图片 │  │ →生成图片 │  │ →AI精修   │  │ →3D模型  │  │ →完整材质  │  │ 场景/UI   │  │ API调用  │
+│ →原神风格│  │          │  │ →导入资产 │  │ →保持结构  │  │ →Unity    │  │ →Unity.mat│  │ 一键切换   │  │ 面试演示  │
+└──────────┘  └──────────┘  └──────────┘  └──────────┘  └──────────┘  └──────────┘  └──────────┘  └──────────┘
 ```
 
 ---
@@ -37,6 +37,7 @@
 | 阶段 5 | 📹 [3. TripoSR 转 3D](./3.TripoSR转3d.mp4) | 图片去背景 → AI 生成 3D 模型 → Unity |
 | 阶段 6 | 📹 [4. PBR 材质生成](./4.生成PBR材质.mp4) | prompt → StableMaterials 生成贴图 → Unity Material |
 | 阶段 7 | 🌐 [Web UI](http://127.0.0.1:8000/workflow-ui/) | 4 条工作流 → 选产线 → 填描述 → 点生成 |
+| 阶段 8 | 📹 [5. ComfyUI 工作流](./5.简易ComfyUI工作流.mp4) | 4 套 .json 节点图 → 可视化 → API → 面试可演示 |
 
 ---
 
@@ -483,10 +484,55 @@ PBR 材质默认使用 Triplanar（三平面）纹理投射，**无视模型的 
 | 3D 重建 | TripoSR（Stability AI） | 单图 → 带贴图 3D mesh（.glb） |
 | PBR 材质 | StableMaterials（MatFuse + LCM） | prompt → 完整 PBR 贴图集（.mat） |
 | 工作流引擎 | Python 工作流编排 + Prompt 模板引擎 | 4 条标准化游戏美术产线 |
+| ComfyUI 工作流 | ComfyUI 0.26 + 自定义节点 + 4 套 .json 节点图 | 可视化节点图 + API，面试可演示 |
 | 自动标注 | WD SwinV2 Tagger v3（ONNX Runtime） | 训练数据自动打标 |
 | 推理服务 | FastAPI + Uvicorn | 本地 HTTP API（`/generate` 等接口 + `/workflows/run`） |
 | 游戏引擎 | Unity 2022.3 LTS | Editor 插件 + 工作流模式 + 资产一键导入 |
 | 硬件 | NVIDIA RTX 4060 Laptop（8 GB） | 本地实时推理 |
+
+---
+
+### 阶段 8：ComfyUI 游戏美术工作流
+
+**目标**：把 4 条产线做成 ComfyUI 标准节点图（.json），通过 API 调用。面试可演示。
+
+**与阶段 7 的关系**：
+- 阶段 7 是轻量级 Python 引擎（复用全局单例，零新依赖）
+- 阶段 8 是标准 ComfyUI 工作流（行业标准工具，可视化节点图）
+- 两套系统**互不干扰**：ComfyUI 端口 8188，FastAPI 端口 8000
+
+**四条 ComfyUI 工作流**：
+
+| 工作流 | 文件 | 输入 | 输出 | 核心节点 |
+|--------|------|------|------|----------|
+| 🎭 角色概念图 | `character_concept.json` | 文字描述 | 1024×576 角色转身图 | DiffusersLoader → KSampler(30步) → VAEDecode |
+| 🎯 游戏素材 | `asset_icon_text.json` | 文字描述 | 512×512 游戏图标 | DiffusersLoader → KSampler(25步) → SaveImage |
+| 📦 3D 模型 | `model_3d.json` | 物体照片 | .glb 3D 模型 + 网页预览 | TripoSRLoader → TripoSRSampler → MeshSave → Preview3D |
+| 🧱 PBR 材质 | `pbr_material.json` | 材质描述 | 5 张 PBR 贴图 | StableMaterials(自定义节点) → SaveImage×5 |
+
+**自定义节点**：
+
+| 节点 | 来源 | 用途 |
+|------|------|------|
+| `ComfyUI-StableMaterials` | **自己编写** | StableMaterials PBR 材质生成 |
+| `ComfyUI-Flowty-TripoSR` | flowtyone（已修复键名兼容） | TripoSR 图片转 3D mesh |
+| `comfyui_controlnet_aux` | Fannovel16 | ControlNet 预处理器(Canny/HED/Depth) |
+| `comfyui_remove_background` | d3cker | rembg 去背景 |
+
+**使用方式**：
+```bash
+# 启动
+双击 ComfyUI/start_comfyui.bat
+浏览器打开 http://127.0.0.1:8188
+
+# 使用工作流
+把 ComfyUI/workflows/*.json 拖入浏览器窗口
+改 prompt → 点 Queue Prompt
+
+# API 调用
+POST http://127.0.0.1:8188/prompt
+Body: {"prompt": <workflow_json>}
+```
 
 ---
 
@@ -495,6 +541,7 @@ PBR 材质默认使用 Triplanar（三平面）纹理投射，**无视模型的 
 - [x] ~~图片转 3D 模型~~ ✅ 管线已打通（TripoSR），需升级底模改善质量
 - [x] ~~PBR 材质批量生成~~ ✅ 管线已打通（StableMaterials），prompt → 完整材质球
 - [x] ~~游戏美术工作流引擎~~ ✅ 4 条标准化产线，零新模型依赖
+- [x] ~~ComfyUI 游戏美术工作流~~ ✅ 4 套 .json 节点图 + API，面试可演示
 - [ ] 升级 3D 底模（TRELLIS / Unique3D，改善角色和背面质量）
 - [ ] 训练自己的 ControlNet（用游戏素材风格）
 - [ ] 批量生成 + 多种子变体（一次生成多张，挑最好的）

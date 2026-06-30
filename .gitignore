@@ -43,6 +43,9 @@ check_result.txt
 # ==== Claude ====
 .claude/
 
+# ==== ComfyUI 完整安装（不提交，按 README 指引自行 clone）====
+ComfyUI/
+
 # ==== 系统文件 ====
 Thumbs.db
 Desktop.ini

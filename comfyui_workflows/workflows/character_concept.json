@@ -1,0 +1,107 @@
+{
+  "1": {
+    "class_type": "DiffusersLoader",
+    "inputs": {
+      "model_path": "Counterfeit-V2.5"
+    },
+    "_meta": {
+      "title": "Load Counterfeit-V2.5"
+    }
+  },
+  "2": {
+    "class_type": "CLIPTextEncode",
+    "inputs": {
+      "text": "masterpiece, best quality, character turnaround sheet, 1girl, genshin impact style, raiden shogun, multiple views of the same character, front view, side view, back view, three quarter view, full body, standing, white background, character design sheet, reference sheet, same character in all views, consistent design, detailed character reference, game character concept art",
+      "clip": [
+        "1",
+        1
+      ]
+    },
+    "_meta": {
+      "title": "Positive Prompt"
+    }
+  },
+  "3": {
+    "class_type": "CLIPTextEncode",
+    "inputs": {
+      "text": "different characters, inconsistent design, merged views, overlapping views, cropped views, missing views, out of frame, close-up, portrait, face only, upper body only, messy layout, text labels, watermark, lowres, bad anatomy, bad hands, worst quality, blurry, ugly, deformed, distorted body, bad proportions, extra limbs, fused limbs, too many fingers, disfigured, mutated, doll, plastic, 3D render, photo, realistic",
+      "clip": [
+        "1",
+        1
+      ]
+    },
+    "_meta": {
+      "title": "Negative Prompt"
+    }
+  },
+  "4": {
+    "class_type": "EmptyLatentImage",
+    "inputs": {
+      "width": 1024,
+      "height": 576,
+      "batch_size": 1
+    },
+    "_meta": {
+      "title": "1024x576 Latent"
+    }
+  },
+  "5": {
+    "class_type": "KSampler",
+    "inputs": {
+      "model": [
+        "1",
+        0
+      ],
+      "positive": [
+        "2",
+        0
+      ],
+      "negative": [
+        "3",
+        0
+      ],
+      "latent_image": [
+        "4",
+        0
+      ],
+      "seed": 169346268,
+      "steps": 30,
+      "cfg": 8.5,
+      "sampler_name": "euler",
+      "scheduler": "normal",
+      "denoise": 1.0
+    },
+    "_meta": {
+      "title": "KSampler"
+    }
+  },
+  "6": {
+    "class_type": "VAEDecode",
+    "inputs": {
+      "samples": [
+        "5",
+        0
+      ],
+      "vae": [
+        "1",
+        2
+      ]
+    },
+    "_meta": {
+      "title": "VAE Decode"
+    }
+  },
+  "7": {
+    "class_type": "SaveImage",
+    "inputs": {
+      "filename_prefix": "CharacterConcept",
+      "images": [
+        "6",
+        0
+      ]
+    },
+    "_meta": {
+      "title": "Save Image"
+    }
+  }
+}
