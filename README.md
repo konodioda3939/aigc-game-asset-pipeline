@@ -22,7 +22,7 @@
 │          │  │ API      │  │ 插件      │  │ 可控生成   │  │ 图片→3D   │  │ 自动生成   │  │ 4条产线   │  │ 节点图   │
 │ 48张原神图│  │ FastAPI  │  │ 输入文字  │  │ 草图/线稿  │  │ 上传图片  │  │ 输入描述   │  │ 角色/图标  │  │ 可视化   │
 │ →训练LoRA│  │ →PNG图片 │  │ →生成图片 │  │ →AI精修   │  │ →3D模型  │  │ →完整材质  │  │ 场景/UI   │  │ API调用  │
-│ →原神风格│  │          │  │ →导入资产 │  │ →保持结构  │  │ →Unity    │  │ →Unity.mat│  │ 一键切换   │  │ 面试演示  │
+│ →原神风格│  │          │  │ →导入资产 │  │ →保持结构  │  │ →Unity    │  │ →Unity.mat│  │ 一键切换   │  │ 标准工具 │
 └──────────┘  └──────────┘  └──────────┘  └──────────┘  └──────────┘  └──────────┘  └──────────┘  └──────────┘
 ```
 
@@ -37,7 +37,7 @@
 | 阶段 5 | 📹 [3. TripoSR 转 3D](./3.TripoSR转3d.mp4) | 图片去背景 → AI 生成 3D 模型 → Unity |
 | 阶段 6 | 📹 [4. PBR 材质生成](./4.生成PBR材质.mp4) | prompt → StableMaterials 生成贴图 → Unity Material |
 | 阶段 7 | 🌐 [Web UI](http://127.0.0.1:8000/workflow-ui/) | 4 条工作流 → 选产线 → 填描述 → 点生成 |
-| 阶段 8 | 📹 [5. ComfyUI 工作流](./5.简易ComfyUI工作流.mp4) | 4 套 .json 节点图 → 可视化 → API → 面试可演示 |
+| 阶段 8 | 📹 [5. ComfyUI 工作流](./5.简易ComfyUI工作流.mp4) | 4 套 .json 节点图 → 可视化节点编排 → API 调用 |
 
 ---
 
@@ -80,9 +80,21 @@ aigc-project/
 ├── caption.py                      ← WD14 ONNX 自动打标
 ├── inference_compare.py            ← LoRA 加载前后对比推理
 │
-├── 1.Lora生图.mp4                   ← 🎥 阶段1 演示：LoRA 文生图
-├── 2.ControlNet修图.mp4             ← 🎥 阶段2+4 演示：ControlNet 草图精修
-└── 3.TripoSR转3d.mp4                ← 🎥 阶段5 演示：图片转 3D 模型
+├── comfyui_workflows/               ← ComfyUI 工作流文件
+│   ├── workflows/                    ← 4 套 .json 节点图
+│   ├── custom_nodes/                 ← 自定义节点（StableMaterials）
+│   ├── start_comfyui.bat             ← ComfyUI 启动脚本
+│   └── extra_model_paths.yaml        ← 模型路径配置
+│
+├── scripts/                          ← 辅助脚本
+│   ├── lora_convert.py               ← PEFT→ComfyUI LoRA 格式转换
+│   └── create_workflows.py           ← 工作流 JSON 生成器
+│
+├── 1.Lora生图.mp4                   ← 🎥 阶段1 演示
+├── 2.ControlNet修图.mp4             ← 🎥 阶段2+4 演示
+├── 3.TripoSR转3d.mp4                ← 🎥 阶段5 演示
+├── 4.生成PBR材质.mp4                 ← 🎥 阶段6 演示
+└── 5.简易ComfyUI工作流.mp4           ← 🎥 阶段8 演示
 ```
 
 ---
@@ -429,12 +441,6 @@ PBR 材质默认使用 Triplanar（三平面）纹理投射，**无视模型的 
 
 ### 阶段 7：简易游戏美术工作流引擎
 
-**目标**：把 AI 能力封装成标准化「生产线」，美术不用懂技术。
-
-**一句话**：选工作流 → 输入描述 → 点生成。
-
-> ⚠️ 与计划书的差异：计划书原定搭建 ComfyUI 工作流，但 ComfyUI（~10GB+）在 8GB 显存下无法与现有管线共存。实际落地为**轻量级工作流引擎**——复用 SD 1.5 + LoRA + ControlNet + TripoSR + StableMaterials 全局单例，零额外显存、零新模型下载。核心理念一致：把 AI 能力沉淀为标准化产线。
-
 **四条产线**：
 
 | 工作流 | 输入 | 输出 | 底层引擎 |
@@ -484,7 +490,7 @@ PBR 材质默认使用 Triplanar（三平面）纹理投射，**无视模型的 
 | 3D 重建 | TripoSR（Stability AI） | 单图 → 带贴图 3D mesh（.glb） |
 | PBR 材质 | StableMaterials（MatFuse + LCM） | prompt → 完整 PBR 贴图集（.mat） |
 | 工作流引擎 | Python 工作流编排 + Prompt 模板引擎 | 4 条标准化游戏美术产线 |
-| ComfyUI 工作流 | ComfyUI 0.26 + 自定义节点 + 4 套 .json 节点图 | 可视化节点图 + API，面试可演示 |
+| ComfyUI 工作流 | ComfyUI 0.26 + 自定义节点 + 4 套 .json 节点图 | 可视化节点图 + API 调用 |
 | 自动标注 | WD SwinV2 Tagger v3（ONNX Runtime） | 训练数据自动打标 |
 | 推理服务 | FastAPI + Uvicorn | 本地 HTTP API（`/generate` 等接口 + `/workflows/run`） |
 | 游戏引擎 | Unity 2022.3 LTS | Editor 插件 + 工作流模式 + 资产一键导入 |
@@ -494,7 +500,7 @@ PBR 材质默认使用 Triplanar（三平面）纹理投射，**无视模型的 
 
 ### 阶段 8：ComfyUI 游戏美术工作流
 
-**目标**：把 4 条产线做成 ComfyUI 标准节点图（.json），通过 API 调用。面试可演示。
+**目标**：把 4 条产线做成 ComfyUI 标准节点图（.json），通过 API 调用。
 
 **与阶段 7 的关系**：
 - 阶段 7 是轻量级 Python 引擎（复用全局单例，零新依赖）
@@ -514,7 +520,7 @@ PBR 材质默认使用 Triplanar（三平面）纹理投射，**无视模型的 
 
 | 节点 | 来源 | 用途 |
 |------|------|------|
-| `ComfyUI-StableMaterials` | **自己编写** | StableMaterials PBR 材质生成 |
+| `ComfyUI-StableMaterials` | 结合ai工具编写 | StableMaterials PBR 材质生成 |
 | `ComfyUI-Flowty-TripoSR` | flowtyone（已修复键名兼容） | TripoSR 图片转 3D mesh |
 | `comfyui_controlnet_aux` | Fannovel16 | ControlNet 预处理器(Canny/HED/Depth) |
 | `comfyui_remove_background` | d3cker | rembg 去背景 |
@@ -541,7 +547,7 @@ Body: {"prompt": <workflow_json>}
 - [x] ~~图片转 3D 模型~~ ✅ 管线已打通（TripoSR），需升级底模改善质量
 - [x] ~~PBR 材质批量生成~~ ✅ 管线已打通（StableMaterials），prompt → 完整材质球
 - [x] ~~游戏美术工作流引擎~~ ✅ 4 条标准化产线，零新模型依赖
-- [x] ~~ComfyUI 游戏美术工作流~~ ✅ 4 套 .json 节点图 + API，面试可演示
+- [x] ~~ComfyUI 游戏美术工作流~~ ✅ 4 套 .json 节点图 + API，
 - [ ] 升级 3D 底模（TRELLIS / Unique3D，改善角色和背面质量）
 - [ ] 训练自己的 ControlNet（用游戏素材风格）
 - [ ] 批量生成 + 多种子变体（一次生成多张，挑最好的）
@@ -557,4 +563,3 @@ MIT
 
 ---
 
-> 🤖 本项目在 [Claude Code](https://claude.ai/code) 辅助下完成，全流程对话式开发。
