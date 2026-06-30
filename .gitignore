@@ -63,3 +63,4 @@ mesh_tools/*.glb
 mesh_tools/*.zip
 mesh_tools/d5_regress_lcm.png
 mesh_tools/input/tripoSR_orange.jpg
+mesh_tools/d6_compare/
