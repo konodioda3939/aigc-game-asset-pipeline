@@ -53,3 +53,13 @@ TripoSR/
 Thumbs.db
 Desktop.ini
 .DS_Store
+
+# ==== 项目 D：mesh_tools 测试产物（大文件，可由脚本重新生成，不提交）====
+mesh_tools/d2_output/
+mesh_tools/d5_test/
+mesh_tools/d5_test2/
+mesh_tools/d5_e2e_unzip/
+mesh_tools/*.glb
+mesh_tools/*.zip
+mesh_tools/d5_regress_lcm.png
+mesh_tools/input/tripoSR_orange.jpg

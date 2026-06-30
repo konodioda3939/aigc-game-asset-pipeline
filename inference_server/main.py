@@ -1030,6 +1030,94 @@ async def run_workflow(
         )
 
 
+# ===== 3D 模型后处理（项目 D-5：减面 + 展UV + LOD）=====
+@app.post("/post-process-mesh")
+async def post_process_mesh(
+    file: UploadFile = File(..., description="待处理 glb（通常来自 /generate-3d）"),
+    target_faces: int = Form(8000, ge=500, le=200000, description="LOD0 目标面数"),
+    uv_unwrap: bool = Form(True, description="展UV（true→解锁 Unity Standard shader）"),
+    lod_faces: str = Form("2500,800", description="额外 LOD 面数，逗号分隔，如 '2500,800'。留空=只输出 LOD0"),
+    render_preview: bool = Form(True, description="渲染预览图"),
+):
+    """
+    游戏级 Mesh 后处理：减面 + 展UV + LOD + 预览渲染。
+    纯 CPU（Blender headless subprocess），不影响 GPU 推理，不碰 SD/TripoSR 单例。
+
+    - **file**: 上传一个 glb（通常是 /generate-3d 的毛坯输出）
+    - **target_faces**: LOD0（主模型）目标面数，默认 8000
+    - **uv_unwrap**: 是否 Smart UV Project 展 UV（默认 true）
+    - **lod_faces**: 额外 LOD 的面数，如 "2500,800" → 生成 LOD1(2500)、LOD2(800)
+    - **render_preview**: 是否渲染一张 LOD0 预览图（默认 true）
+
+    返回 ZIP（application/zip）：
+      - LOD0.glb, LOD1.glb, ...   各级减面模型（带顶点色 COLOR_0 + UV TEXCOORD_0 + 法线）
+      - preview_LOD0.png          预览渲染图
+      - manifest.json             每级面数/顶点/UV/顶点色状态
+
+    需要本机安装 Blender（路径由 BLENDER_EXE 环境变量或默认路径解析）。
+    """
+    import subprocess as _sp
+    from mesh_postprocessor import run_post_process
+
+    # 1. 读取并校验是 glb（前 4 字节 b'glTF'）
+    raw = await file.read()
+    if raw[:4] != b'glTF':
+        raise HTTPException(status_code=400, detail="上传文件不是有效 glb（缺 glTF 魔数头）。")
+
+    # 2. 解析 lod_faces → list[int]
+    lod_str = (lod_faces or "").strip()
+    lod_list = []
+    if lod_str:
+        try:
+            lod_list = [int(x) for x in lod_str.split(",") if x.strip()]
+        except ValueError:
+            raise HTTPException(status_code=400, detail=f"lod_faces 解析失败：'{lod_faces}' 应为逗号分隔的整数。")
+    for n in lod_list:
+        if n < 100 or n > target_faces:
+            raise HTTPException(status_code=400, detail=f"LOD 面数须在 100~target_faces({target_faces}) 之间，收到 {n}。")
+
+    # 3. 落地到独立工作目录（每请求一个，timestamp 命名，防并发污染）
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+    work_dir = OUTPUT_DIR / f"{timestamp}_pp"
+    work_dir.mkdir(parents=True, exist_ok=True)
+    input_path = work_dir / "input.glb"
+    input_path.write_bytes(raw)
+
+    print(f"\n[post-process-mesh] file={file.filename}, size={len(raw)/1024:.0f} KB, "
+          f"target={target_faces}, lod={lod_list}, uv={uv_unwrap}, preview={render_preview}", flush=True)
+
+    # 4. 调 Blender 后处理（纯 CPU，不碰 torch / model_loader）
+    try:
+        zip_data = run_post_process(
+            input_glb_path=str(input_path),
+            work_dir=str(work_dir),
+            target_faces=target_faces,
+            lod_faces=lod_list,
+            uv_unwrap=uv_unwrap,
+            render_preview=render_preview,
+        )
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=500, detail=f"Blender 未安装或路径错误：{e}")
+    except _sp.TimeoutExpired as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"3D 后处理失败：{e}")
+
+    # 5. 返回 ZIP
+    filename = f"{timestamp}_postprocessed.zip"
+    return Response(
+        content=zip_data,
+        media_type="application/zip",
+        headers={
+            "X-Filename": filename,
+            "X-Target-Faces": str(target_faces),
+            "X-LOD-Levels": str(1 + len(lod_list)),
+            "X-UV-Unwrap": str(uv_unwrap).lower(),
+            "Content-Disposition": f"attachment; filename={filename}",
+        },
+    )
+
+
 # ===== 关闭事件 =====
 
 @app.on_event("shutdown")

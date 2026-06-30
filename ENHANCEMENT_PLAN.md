@@ -42,7 +42,7 @@ JD 反复点名的关键词：**图像/视频/3D 内容生成、多模态、3D �
 |------|--------------|------|---------|---------|
 | **A. 3D 模型动作生成** | 3D 动作 | ⬜ 未开始 | 0% | 让 TripoSR 静态模型"动起来" |
 | **C. 推理优化** | 推理优化 | ✅ 已完成 | 100% | 3.88→0.75s(×5.2)，画质无损，已集成「快速模式」开关 |
-| **D. Mesh 后处理** | Mesh 数据处理 | ⬜ 未开始 | 0% | 毛坯模型打磨成"游戏可用" |
+| **D. Mesh 后处理** | Mesh 数据处理 | 🔄 进行中 | ~80% | D-5 完成：/post-process-mesh 接口上线（上传glb→减面+UV+LOD 的 ZIP），回归不破坏 C |
 | B. 视频生成（缓后） | 视频 | ⏸ 暂缓 | - | 见「六、缓后项目」 |
 
 > 状态图例：⬜ 未开始 / 🔄 进行中 / ✅ 已完成 / ⏸ 暂缓 / ⚠️ 阻塞
@@ -177,11 +177,11 @@ TripoSR 出的 3D 模型是"毛坯"——面数动辄十几万（游戏跑不动
 | **贴图烘焙（可选）** | Blender bpy / xatlas | 把高模细节"印"到低模贴图上 |
 
 ### D.4 落地步骤
-- [ ] **D-1 现状评估**：测 TripoSR 输出模型的面数、是否有 UV、是否游戏可用
-- [ ] **D-2 减面 + LOD**：写脚本自动减面 + 生成 2~3 级 LOD
-- [ ] **D-3 UV 展开**：用 xatlas 自动展 UV，验证能贴 PBR 材质
+- [x] **D-1 现状评估**：测 TripoSR 输出模型的面数、是否有 UV、是否游戏可用 ✅ 2026-07-01（见 D.7）
+- [x] **D-2 减面 + LOD**：写脚本自动减面 + 生成 2~3 级 LOD ✅ 2026-07-01（见 D.7）
+- [x] **D-3 UV 展开**：用 xatlas 自动展 UV，验证能贴 PBR 材质 ✅ 2026-07-01（改用 Blender Smart UV Project，见 D.7）
 - [ ] **D-4（可选）贴图烘焙**：高模→低模细节转移
-- [ ] **D-5 集成**：推理服务加"导出游戏级 Mesh"选项（带 LOD + UV）
+- [x] **D-5 集成**：推理服务加"导出游戏级 Mesh"选项（带 LOD + UV）✅ 2026-07-01（见 D.7）
 - [ ] **D-6 对比**：原始毛坯 vs 优化后，Unity 里跑性能对比
 
 ### D.5 验收标准
@@ -195,6 +195,35 @@ TripoSR 出的 3D 模型是"毛坯"——面数动辄十几万（游戏跑不动
 
 ### D.7 状态与日志
 - 2026-06-30：计划立项，未开工。
+- 2026-07-01：✅ 完成 **D-1 现状评估**。用 trimesh 批量体检 14 个 TripoSR 输出（脚本 `mesh_tools/inspect_mesh.py`，纯只读）：
+  - **面数 11.78 万 ~ 19.5 万（平均 17.2 万）**，全部远超游戏可用阈值（<1 万），超标 10~20 倍 → D-2 减面是头号任务。
+  - **UV 坐标 0/14，纹理材质 0/14**；**顶点色 14/14 全有**——TripoSR 仅靠顶点色携带颜色，印证了 CLAUDE.md 铁律 6（必须用 `AIGC/TriplanarPBR` 无视 UV 的 shader）。D-3 必须展 UV 才能解锁 Standard shader。
+  - 封闭性 9/14 watertight；尺寸均归一化到 ~1.0 立方体。
+  - 踩坑：① 第一版检测误判 UV（trimesh `TextureVisuals.uv` 属性存在但为空），增强检测（按 UV 唯一坐标点数）后才确认真无 UV；② Windows 控制台 GBK 编码不支持 emoji，脚本输出改纯 ASCII。
+  - 产物：`mesh_tools/inspect_mesh.py`、`mesh_tools/d1_assessment.json`（14 个模型完整指标）。
+- 2026-07-01：✅ 完成 **D-2 减面 + LOD**（Blender MCP）。样本：`20260626_115239_318204_3d_model.glb`（18.89 万面）。
+  - Decimate（COLLAPSE 模式，按 `ratio=目标/原始` 设定）精准砍到 3 级 LOD：**LOD0 8000 面 / LOD1 2500 面 / LOD2 800 面**（缩面最高 ×236）。
+  - **顶点色完整保留**（glb `COLOR_0=YES`，COLLAPSE 插值）；**Blender 顺手补了法线 NORMAL**（原始 TripoSR glb 连法线都没有，补上对游戏光照有利）。
+  - 导出 3 个独立 glb + 3 张同视角渲染对比图（`mesh_tools/d2_output/`）。
+  - 踩坑：① Blender 5.1 新建材质默认 BSDF 节点名不再是字符串 `"Principled BSDF"`，须按 `node.type=='BSDF_PRINCIPLED'` 匹配；② 渲染引擎改用 `BLENDER_EEVEE_NEXT`；③ **trimesh 对"glb 同时带材质+顶点色"会误报无顶点色**（实际 `COLOR_0` 在文件里），需解析 glb JSON 确认 → 已写 `mesh_tools/check_glb_attrs.py` 兜底；④ glb 按属性拆分顶点，导出后顶点数 ≈ 面数×3（Blender 内部共享顶点），非 bug。
+  - 产物：`mesh_tools/d2_output/{LOD0_fine,LOD1_mid,LOD2_far}.glb`、3 张 `render_*.png`、`mesh_tools/check_glb_attrs.py`。
+- 2026-07-01：✅ **换图验证 D-2 通用性**：用户新图（橙子 `tripoSR_orange.jpg`）经 `/generate-3d` 生成新毛坯（19.1 万面），重跑减面 → LOD0/1/2 = 8000/2500/800，顶点色全保留。证明减面流程不挑图（剑+橙子双验证）。
+- 2026-07-01：✅ 完成 **D-3 UV 展开**（Blender MCP）。对象：orange_LOD0（8000 面）。
+  - Smart UV Project 自动展 UV（须 EDIT 模式调用，OBJECT 模式 poll 失败）。
+  - 棋盘格材质按 UV 渲染，验证 UV 质量（行业惯例：棋盘格均匀=无拉伸）。
+  - **数据铁证**：glb `TEXCOORD_0` 展 UV 前 `NO` → 后 `YES`（`orange_LOD0.glb` vs `orange_LOD0_uv.glb`），解锁 CLAUDE.md 铁律 5「可改 Standard shader」。
+  - 踩坑：① `bpy.ops.uv.smart_project` 在 OBJECT 模式 poll 失败，须 `mode_set('EDIT')` + `mesh.select_all` 后再调；② 材质未引用顶点色时导出会丢 `COLOR_0`（不影响 UV 验证）。
+  - 产物：`mesh_tools/d2_output/orange_LOD0_uv.glb`、`render_orange_LOD0_checker.png`、`render_orange_compare.png`。
+- 2026-07-01：✅ 完成 **D-5 集成进推理服务**（Blender headless subprocess 路线）。新增「游戏级 Mesh 后处理」接口：客户端上传 glb → 一键得 ZIP（减面+UV+LOD+预览+清单）。
+  - 新增 `inference_server/blender_scripts/post_process_mesh.py`：参数化 bpy 脚本（被 `blender --background --python` 调用），固化 D-2/D-3 验证的减面+展UV+LOD+渲染流程，写 manifest.json。
+  - 新增 `inference_server/mesh_postprocessor.py`：编排模块（subprocess 调 Blender + blender.exe 三级路径回退 + 5min 超时兜底 + ZIP 打包），**纯 CPU 不 import torch**。
+  - 修改 `inference_server/main.py`：仅在 shutdown 事件前**追加** `POST /post-process-mesh` 接口（参数 file/target_faces/uv_unwrap/lod_faces/render_preview → ZIP 响应），现有 4 接口正文一行未改。
+  - **铁律遵守**：未碰 `model_loader.py`（保护 C 的 fast_mode/LCM）、未碰工作流引擎。
+  - 技术路线选 Blender headless 而非纯 Python：trimesh 减面依赖 `fast-simplification`（Windows Rust 编译易失败）且不会展 UV；Blender 已装、效果已 D-2/D-3 验证。
+  - 端到端测试（橙子 19.1 万面）：接口 6.7s 返回 ZIP，3 级 LOD 均 `COLOR_0=YES` + `TEXCOORD_0=YES`。
+  - 回归验证：`/health` 正常；`/generate fast_mode=true` 仍 LCM 出图（PNG 462KB / 3.9s）—— **证明未破坏项目 C**。
+  - 踩坑：① EEVEE_NEXT 在 headless 无界面模式**可**渲染（原担心要改 Cycles CPU，多虑了）；② Blender 5.1 新建材质 BSDF 节点名变了，按 `type=='BSDF_PRINCIPLED'` 匹配；③ `smart_project` 必须 EDIT 模式；④ `GenerateRequest.steps` 有 `ge=10` 约束，测 fast_mode 时**不能传 steps<10**（fast_mode 会自动把默认 25 改成 6 步，正确用法是不传 steps）。
+  - 产物：`/post-process-mesh` 接口 + 上述 2 个新文件；测试脚本 `mesh_tools/test_postprocessor.py`。
 
 ---
 
@@ -232,9 +261,9 @@ TripoSR 出的 3D 模型是"毛坯"——面数动辄十几万（游戏跑不动
 
 当前建议执行顺序（性价比从高到低）：
 
-1. **🥇 优先做项目 C（推理优化）**：复用现有代码、不用新模型、出数据最快、面试最硬。**建议第一站**。
-2. **🥈 接着做项目 D（Mesh 后处理）**：补全 3D 链路，工具脚本为主，难度中低。
-3. **🥉 最后做项目 A（3D 动作）**：故事性最强但环节最多，放 C/D 出成果、信心足之后做。
+1. ~~**项目 C（推理优化）**~~ ✅ **已完成**（3.88→0.75s ×5.2）。
+2. **🥇 当前做项目 D（Mesh 后处理）**：D-1~D-3 + D-5 已完成（减面/展UV/LOD + 服务集成接口 `/post-process-mesh`）。**下一步 D-6 Unity 性能对比验证**（或可选 D-4 贴图烘焙）。
+3. **🥈 之后做项目 A（3D 动作）**：故事性最强但环节最多，放 D 出成果、信心足之后做。
 
 > 💡 也可按用户意愿调整顺序。开工任一项目前，AI 应先把对应项目的「落地步骤」拆成可执行清单，用大白话向用户说明，再动手。
 

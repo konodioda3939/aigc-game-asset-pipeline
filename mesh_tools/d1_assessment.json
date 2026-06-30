@@ -1,0 +1,71 @@
+[
+  {
+    "path": "mesh_tools\\d2_output\\LOD0_fine.glb",
+    "format": "glb",
+    "size_mb": 0.871,
+    "geometry_count": 1,
+    "vertices": 23991,
+    "faces": 7997,
+    "visual_types": [
+      "TextureVisuals"
+    ],
+    "has_uv": false,
+    "uv_unique_points": 0,
+    "has_vertex_colors": false,
+    "has_texture_material": true,
+    "watertight": false,
+    "extent_xyz": [
+      0.9762,
+      0.9979,
+      0.8353
+    ],
+    "max_extent": 0.9979,
+    "game_ready_guess": true
+  },
+  {
+    "path": "mesh_tools\\d2_output\\LOD1_mid.glb",
+    "format": "glb",
+    "size_mb": 0.273,
+    "geometry_count": 1,
+    "vertices": 7489,
+    "faces": 2497,
+    "visual_types": [
+      "TextureVisuals"
+    ],
+    "has_uv": false,
+    "uv_unique_points": 0,
+    "has_vertex_colors": false,
+    "has_texture_material": true,
+    "watertight": false,
+    "extent_xyz": [
+      0.9789,
+      0.9947,
+      0.8337
+    ],
+    "max_extent": 0.9947,
+    "game_ready_guess": true
+  },
+  {
+    "path": "mesh_tools\\d2_output\\LOD2_far.glb",
+    "format": "glb",
+    "size_mb": 0.088,
+    "geometry_count": 1,
+    "vertices": 2391,
+    "faces": 797,
+    "visual_types": [
+      "TextureVisuals"
+    ],
+    "has_uv": false,
+    "uv_unique_points": 0,
+    "has_vertex_colors": false,
+    "has_texture_material": true,
+    "watertight": false,
+    "extent_xyz": [
+      0.9907,
+      0.9885,
+      0.8363
+    ],
+    "max_extent": 0.9907,
+    "game_ready_guess": true
+  }
+]
