@@ -36,8 +36,8 @@
 | 阶段 2+4 | 📹 [2. ControlNet 修图](./2.ControlNet修图.mp4) | Unity 插件 + 草图/线稿 → AI 精修 |
 | 阶段 5 | 📹 [3. TripoSR 转 3D](./3.TripoSR转3d.mp4) | 图片去背景 → AI 生成 3D 模型 → Unity |
 | 阶段 6 | 📹 [4. PBR 材质生成](./4.生成PBR材质.mp4) | prompt → StableMaterials 生成贴图 → Unity Material |
-| 阶段 7 | 🌐 [Web UI](http://127.0.0.1:8000/workflow-ui/) | 4 条工作流 → 选产线 → 填描述 → 点生成 |
-| 阶段 8 | 📹 [5. ComfyUI 工作流](./5.简易ComfyUI工作流.mp4) | 4 套 .json 节点图 → 可视化节点编排 → API 调用 |
+| 阶段 7 | 📹 [5. 简易游戏美术生成管线](./5.简易游戏美术生成管线.mp4) | 4 条工作流 → 选产线 → 填描述 → 点生成 |
+| 阶段 8 | 📹 [6. ComfyUI 工作流](./6.简易ComfyUI工作流.mp4) | 4 套 .json 节点图 → 可视化节点编排 → API 调用 |
 
 ---
 
@@ -94,7 +94,8 @@ aigc-project/
 ├── 2.ControlNet修图.mp4             ← 🎥 阶段2+4 演示
 ├── 3.TripoSR转3d.mp4                ← 🎥 阶段5 演示
 ├── 4.生成PBR材质.mp4                 ← 🎥 阶段6 演示
-└── 5.简易ComfyUI工作流.mp4           ← 🎥 阶段8 演示
+├── 5.简易游戏美术生成管线.mp4         ← 🎥 阶段7 演示
+└── 6.简易ComfyUI工作流.mp4           ← 🎥 阶段8 演示
 ```
 
 ---
