@@ -73,6 +73,8 @@ _triposr_model = None       # TripoSR TSR 模型实例（全局单例）
 _pbr_pipeline = None       # StableMaterials PBR 管线（全局单例）
 _pbr_lock = threading.Lock()  # PBR 管线互斥锁（防止并发卸载冲突）
 
+_lcm_active = False           # LCM 快速模式是否启用（项目 C 推理优化）
+
 
 # ===== 设备检测 =====
 
@@ -135,7 +137,12 @@ def load_pipeline() -> StableDiffusionPipeline:
 
     # --- 移到设备 + 优化 ---
     pipe = pipe.to(device)
-    pipe.enable_attention_slicing()
+    # 注意力计算：用 PyTorch 2.x 原生 SDPA（diffusers 在 torch>=2.0 自动启用 AttnProcessor2_0），
+    # 不再用 enable_attention_slicing()。
+    # 原因（项目 C 推理优化，基线实测 2026-06-30）：512×512/25步 峰值显存仅 2.63GB（8GB 的 33%），
+    # 显存非常充裕；attention_slicing 是"以速度换显存"的妥协，在显存不缺时纯属白拖慢。
+    # SDPA 同时更快、显存也够用。如未来遇到显存吃紧（大图/多模型共存），再取消下行注释切回。
+    # pipe.enable_attention_slicing()
 
     # --- 保存共享组件（供 ControlNet 管线复用 UNet/VAE/TextEncoder） ---
     _shared_components = {
@@ -156,6 +163,89 @@ def get_pipeline() -> StableDiffusionPipeline | None:
     if _pipeline is None:
         return load_pipeline()
     return _pipeline
+
+
+# ===== LCM 快速模式（项目 C 推理优化）=====
+# LCM-LoRA 叠加在「已融合角色 LoRA 的 UNet」之上，配合 LCMScheduler 实现 4-8 步出图。
+# 角色 LoRA 已 merge_and_unload 进 UNet 基础权重，LCM-LoRA 只是叠加其上的 peft adapter，
+# unload 只移除 adapter、不影响角色 LoRA —— 因此标准/LCM 模式可安全互切。
+LCM_LORA_ID = "latent-consistency/lcm-lora-sdv1-5"  # 注意：sdv1-5 带横杠，不是 sdv15
+
+
+def _download_lcm_lora() -> str:
+    """下载 LCM-LoRA 单文件到本地（绕过 hf-mirror 对该仓库 /api/ 目录查询的 401）。"""
+    from huggingface_hub import hf_hub_download
+
+    local_dir = CACHE_DIR / "lcm-lora"
+    local_dir.mkdir(parents=True, exist_ok=True)
+    weight_name = "pytorch_lora_weights.safetensors"
+    local_file = local_dir / weight_name
+    if local_file.exists():
+        return str(local_file)
+
+    print(f"[model_loader] 下载 LCM-LoRA（首次约 135MB）...", flush=True)
+    saved_endpoint = os.environ.get("HF_ENDPOINT")
+    last_err = None
+    try:
+        for use_mirror in [True, False]:
+            try:
+                if use_mirror:
+                    os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
+                else:
+                    os.environ.pop("HF_ENDPOINT", None)
+                print(f"[model_loader] LCM-LoRA 尝试 {'hf-mirror' if use_mirror else '直连'}...", flush=True)
+                hf_hub_download(
+                    repo_id=LCM_LORA_ID,
+                    filename=weight_name,
+                    local_dir=str(local_dir),
+                )
+                print(f"[model_loader] LCM-LoRA 下载成功。", flush=True)
+                return str(local_file)
+            except Exception as e:
+                last_err = e
+                print(f"[model_loader] LCM 下载失败: {str(e)[:120]}", flush=True)
+        raise RuntimeError(f"LCM-LoRA 下载失败（镜像和直连均失败）: {last_err}")
+    finally:
+        if saved_endpoint:
+            os.environ["HF_ENDPOINT"] = saved_endpoint
+        else:
+            os.environ.pop("HF_ENDPOINT", None)
+
+
+def ensure_lcm_mode(active: bool) -> None:
+    """
+    幂等地切换 txt2img 管线到 / 离开 LCM 快速模式。
+
+    active=True:  加载 LCM-LoRA + 切 LCMScheduler（4-8 步出图，快约 5 倍）
+    active=False: 卸载 LCM-LoRA + 恢复 DPMSolverMultistepScheduler（标准 25 步）
+
+    已融合的角色 LoRA 不受影响（已 merge_and_unload 进 UNet 基础权重）。
+    ControlNet 管线共享同一个 UNet，因此切回标准模式时务必卸载 LCM-LoRA，
+    否则 ControlNet 会带着 LCM-LoRA 却用 DPM scheduler，出图会崩。
+    """
+    global _lcm_active
+    pipe = get_pipeline()
+    if pipe is None:
+        return
+
+    if active and not _lcm_active:
+        lcm_file = _download_lcm_lora()
+        print(f"[model_loader] → 启用 LCM 快速模式...", flush=True)
+        pipe.load_lora_weights(lcm_file)
+        pipe.scheduler = LCMScheduler.from_config(pipe.scheduler.config)
+        _lcm_active = True
+        print(f"[model_loader] LCM 已启用（建议 steps=4-8, cfg=1.0-2.0）。", flush=True)
+    elif not active and _lcm_active:
+        print(f"[model_loader] → 恢复标准模式...", flush=True)
+        pipe.unload_lora_weights()
+        pipe.scheduler = DPMSolverMultistepScheduler.from_config(pipe.scheduler.config)
+        _lcm_active = False
+        print(f"[model_loader] 标准模式已恢复。", flush=True)
+
+
+def is_lcm_active() -> bool:
+    """返回当前是否处于 LCM 快速模式。"""
+    return _lcm_active
 
 
 # ===== ControlNet 管线 =====

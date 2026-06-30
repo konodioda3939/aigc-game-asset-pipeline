@@ -52,7 +52,7 @@
 - **全局单例**：SD + LoRA 只加载一次，所有请求复用 UNet/VAE/TextEncoder
 - **懒加载**：ControlNet 和 TripoSR 模型按需加载，首次使用自动下载
 - **设备**：CUDA（fp16）优先，CPU（fp32）回退
-- **内存优化**：`attention_slicing` 已启用
+- **注意力/显存**：PyTorch 2.x 原生 SDPA（已替代 attention_slicing，详见下方「推理优化」）
 
 **启动**：
 ```bash
@@ -69,6 +69,13 @@ D:/anaconda3/envs/GPUpytorch-env/python.exe -m uvicorn main:app --host 127.0.0.1
 - **Windows 启动**：用 `python -m uvicorn` 而非裸 `uvicorn`（后者不在 PATH）
 - **print 必须加 flush=True**：否则启动日志被缓冲，用户看不到进度会以为卡了
 - **代码修改需重启服务才能生效**：关掉窗口 → 重新双击 start.bat
+
+**推理优化（项目 C，2026-07-01 完成）**：
+- **SDPA 替代 attention_slicing**：`load_pipeline()` 不再调 `enable_attention_slicing()`，改由 PyTorch 2.x 原生 SDPA 接管（diffusers 在 torch>=2.0 自动用 `AttnProcessor2_0`）。基线实测 512×512 峰值显存仅 2.6/8GB，attention_slicing 的"以速度换显存"纯属白拖慢。25 步：3.88s→2.75s（×1.4），显存不变。
+- **LCM 快速模式（`model_loader.ensure_lcm_mode`）**：叠加 `latent-consistency/lcm-lora-sdv1-5` + LCMScheduler，4 步出图。角色 LoRA 已 `merge_and_unload` 进 UNet，LCM-LoRA 仅作为 peft adapter 叠加其上，`unload_lora_weights()` 只移除 adapter、不影响角色 LoRA——标准/LCM 可安全互切。
+- **开关位置**：`/generate`（`fast_mode` JSON 字段）、`/workflows/run`（`fast_mode` form）、`BaseWorkflow.fast_mode` 透传给 `_txt2img`（快速模式夹紧 `steps≤8`、`cfg=1.5`）。默认关，现有功能零影响。
+- **效果**：3.88s → 0.75s（×5.2），画质盲评 8/10 无损。完整对比见 [`benchmarks/BENCHMARK_REPORT.md`](../benchmarks/BENCHMARK_REPORT.md)。
+- **踩坑**：① LCM 仓库名是 `lcm-lora-sdv1-5`（`v1-5` 带横杠，不是 `sdv15`）；② hf-mirror 对其 `/api/` 目录查询返回 401，改用 `hf_hub_download` 直拉 `/resolve/` 单文件绕过；③ `enable_attention_slicing` 会覆盖 SDPA，必须关掉 SDPA 才生效；④ LCM 必须配 LCMScheduler + 低 CFG（1.0–2.0），切回标准时务必同时卸载 LoRA 和换回 DPM scheduler，否则 ControlNet（共享 UNet）会带 LCM-LoRA 却用 DPM scheduler 而崩图。
 
 ---
 

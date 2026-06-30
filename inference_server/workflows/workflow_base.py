@@ -38,6 +38,7 @@ class BaseWorkflow(ABC):
         self.workflow_id = workflow_id
         self.prompt_engine = prompt_engine or get_prompt_engine()
         self.template = self.prompt_engine.load_template(workflow_id)
+        self.fast_mode = False  # LCM 快速模式开关（项目 C 推理优化），由 API 透传设置
 
     # ===== 子类必须实现 =====
 
@@ -81,7 +82,18 @@ class BaseWorkflow(ABC):
     ) -> Image.Image:
         """纯文本生图。"""
         pipe = self._get_pipeline()
+        from model_loader import ensure_lcm_mode  # 方法内 import，避免循环依赖
         actual_seed = seed if seed is not None else int(time.time() * 1000) % (2**31)
+
+        # ⚡ 快速模式（项目 C 推理优化）：切 LCM，并夹紧到 LCM 适用范围（≤8 步、低 CFG）
+        # 子类（如 character_concept）可能把 steps 抬到 30、cfg 抬到 8.5，这里统一压回 LCM 区间。
+        if self.fast_mode:
+            ensure_lcm_mode(True)
+            steps = min(steps, 8)
+            guidance_scale = 1.5
+            print(f"  [txt2img] ⚡ 快速模式（LCM）: steps={steps}, cfg={guidance_scale}", flush=True)
+        else:
+            ensure_lcm_mode(False)
 
         print(f"  [txt2img] prompt: {prompt[:80]}...", flush=True)
         print(f"  [txt2img] steps={steps}, cfg={guidance_scale}, "
@@ -118,6 +130,8 @@ class BaseWorkflow(ABC):
         strength=1.0 等于纯 txt2img，strength=0.0 等于完全保留原图。
         """
         pipe = self._get_pipeline()
+        from model_loader import ensure_lcm_mode  # img2img 不支持快速模式，强制标准模式
+        ensure_lcm_mode(False)
         actual_seed = seed if seed is not None else int(time.time() * 1000) % (2**31)
 
         # 确保 init_image 是 RGB 且尺寸合理
@@ -187,8 +201,11 @@ class BaseWorkflow(ABC):
         seed: int | None = None,
     ) -> Image.Image:
         """ControlNet 可控生成（复用现有管线）。"""
-        from model_loader import get_controlnet_pipeline
+        from model_loader import get_controlnet_pipeline, ensure_lcm_mode
 
+        # ControlNet 与 txt2img 共享 UNet：若上一次生图启用了 LCM 快速模式，UNet 上还挂着
+        # LCM-LoRA，会让 ControlNet（用 DPM scheduler）崩图。强制切回标准模式。
+        ensure_lcm_mode(False)
         pipe = get_controlnet_pipeline(control_mode)
         actual_seed = seed if seed is not None else int(time.time() * 1000) % (2**31)
 

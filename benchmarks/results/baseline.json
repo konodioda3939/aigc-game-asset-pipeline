@@ -1,0 +1,30 @@
+{
+  "label": "baseline",
+  "size": "512x512",
+  "steps": 25,
+  "guidance_scale": 7.5,
+  "seed": 42,
+  "repeat": 3,
+  "time_seconds": {
+    "mean": 3.882,
+    "min": 3.878,
+    "max": 3.886
+  },
+  "per_step_seconds": {
+    "mean": 0.155
+  },
+  "peak_vram_gb": {
+    "mean": 2.626,
+    "max": 2.626
+  },
+  "all_times": [
+    3.882,
+    3.886,
+    3.878
+  ],
+  "all_peaks": [
+    2.626,
+    2.626,
+    2.626
+  ]
+}

@@ -9,6 +9,7 @@
 
 | 想了解 | 去看 |
 |--------|------|
+| **🚧 求职增强计划（进行中）**：3D 动作 / 推理优化 / Mesh 后处理 | [ENHANCEMENT_PLAN.md](ENHANCEMENT_PLAN.md) |
 | 项目全貌 / 8 阶段详情 / API 参数 / 文件结构（人类视角） | [README.md](README.md) |
 | 硬件 / Python 环境 / Git 推送流程 | [SYSTEM_INFO.md](SYSTEM_INFO.md) |
 | **技术踩坑备忘**（改到某模块时，读对应章节） | [docs/TECHNICAL_NOTES.md](docs/TECHNICAL_NOTES.md) |

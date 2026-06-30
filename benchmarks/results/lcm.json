@@ -1,0 +1,31 @@
+{
+  "label": "lcm",
+  "mode": "lcm",
+  "size": "512x512",
+  "steps": 4,
+  "guidance_scale": 1.5,
+  "seed": 42,
+  "repeat": 3,
+  "time_seconds": {
+    "mean": 0.754,
+    "min": 0.744,
+    "max": 0.766
+  },
+  "per_step_seconds": {
+    "mean": 0.189
+  },
+  "peak_vram_gb": {
+    "mean": 2.754,
+    "max": 2.754
+  },
+  "all_times": [
+    0.766,
+    0.753,
+    0.744
+  ],
+  "all_peaks": [
+    2.754,
+    2.754,
+    2.754
+  ]
+}

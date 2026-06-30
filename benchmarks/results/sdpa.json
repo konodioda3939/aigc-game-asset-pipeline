@@ -1,0 +1,30 @@
+{
+  "label": "sdpa",
+  "size": "512x512",
+  "steps": 25,
+  "guidance_scale": 7.5,
+  "seed": 42,
+  "repeat": 3,
+  "time_seconds": {
+    "mean": 2.745,
+    "min": 2.736,
+    "max": 2.752
+  },
+  "per_step_seconds": {
+    "mean": 0.11
+  },
+  "peak_vram_gb": {
+    "mean": 2.626,
+    "max": 2.626
+  },
+  "all_times": [
+    2.746,
+    2.736,
+    2.752
+  ],
+  "all_peaks": [
+    2.626,
+    2.626,
+    2.626
+  ]
+}

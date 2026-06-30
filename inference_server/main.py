@@ -45,6 +45,8 @@ from model_loader import (
     get_available_controlnet_modes,
     get_triposr_model,
     get_pbr_pipeline,
+    ensure_lcm_mode,
+    is_lcm_active,
     _restore_sd_pipeline,
     _pbr_pipeline,
 )
@@ -85,6 +87,11 @@ class GenerateRequest(BaseModel):
     steps: int = Field(default=25, description="推理步数", ge=10, le=100)
     guidance_scale: float = Field(default=7.5, description="引导强度", ge=1.0, le=20.0)
     seed: int | None = Field(default=None, description="随机种子", ge=0)
+    fast_mode: bool = Field(
+        default=False,
+        description="⚡ LCM 快速模式：4-6 步极速出图（~0.75s/张，快约 5 倍），画质略降但可用。"
+        "默认 False = 标准 25 步。适合快速预览 / 批量出图。",
+    )
 
 
 class HealthResponse(BaseModel):
@@ -323,8 +330,21 @@ async def generate(req: GenerateRequest):
         raise HTTPException(status_code=503, detail="模型尚未加载完成，请稍后重试")
 
     actual_seed = req.seed if req.seed is not None else int(time.time() * 1000) % (2**31)
+
+    # ⚡ 快速模式（项目 C 推理优化）：切换 LCM，并用 LCM 推荐参数覆盖默认值
+    # （用户显式指定了非默认 steps/cfg，则尊重用户的选择）
+    if req.fast_mode:
+        ensure_lcm_mode(True)
+        steps = req.steps if req.steps != 25 else 6
+        cfg = req.guidance_scale if req.guidance_scale != 7.5 else 1.5
+        print(f"[generate] ⚡ 快速模式（LCM）已启用", flush=True)
+    else:
+        ensure_lcm_mode(False)
+        steps = req.steps
+        cfg = req.guidance_scale
+
     print(f"\n[generate] prompt: {req.prompt[:80]}...", flush=True)
-    print(f"[generate] steps={req.steps}, cfg={req.guidance_scale}, seed={actual_seed}", flush=True)
+    print(f"[generate] steps={steps}, cfg={cfg}, seed={actual_seed}", flush=True)
 
     try:
         generator = torch.Generator(pipe.device).manual_seed(actual_seed)
@@ -332,8 +352,8 @@ async def generate(req: GenerateRequest):
             result = pipe(
                 prompt=req.prompt,
                 negative_prompt=req.negative_prompt,
-                num_inference_steps=req.steps,
-                guidance_scale=req.guidance_scale,
+                num_inference_steps=steps,
+                guidance_scale=cfg,
                 generator=generator,
             )
         image: Image.Image = result.images[0]
@@ -423,6 +443,9 @@ async def generate_controlled(
         control_image = control_image.resize(ref_image.size, Image.LANCZOS)
 
     # ---- 3. 获取 ControlNet 管线 ----
+    # ControlNet 与 txt2img 共享 UNet：若上一次请求启用了 LCM 快速模式，UNet 上还挂着
+    # LCM-LoRA，会让 ControlNet（用 DPM scheduler）崩图。这里强制切回标准模式。
+    ensure_lcm_mode(False)
     try:
         pipe = get_controlnet_pipeline(control_mode)
     except ValueError as e:
@@ -860,6 +883,7 @@ async def run_workflow(
     elements: str = Form("", description="UI 元素列表 JSON 数组（ui_elements）"),
     variants: int = Form(1, ge=1, le=4, description="生成变体数量（场景氛围图）"),
     remove_bg: bool = Form(True, description="去背景（道具图标）"),
+    fast_mode: bool = Form(False, description="⚡ LCM 快速模式（4-6 步极速出图，快约 5 倍，适合快速预览）"),
 ):
     """
     执行一个游戏美术工作流。
@@ -923,6 +947,7 @@ async def run_workflow(
         "stitch_grid": stitch_grid,
         "remove_bg": remove_bg,
         "variants": variants,
+        "fast_mode": fast_mode,
     }
     if elements_list is not None:
         params["elements"] = elements_list
@@ -932,6 +957,7 @@ async def run_workflow(
 
     try:
         wf = _workflow_registry[workflow]
+        wf.fast_mode = params.get("fast_mode", False)  # 透传快速模式开关到工作流
         result = wf.generate(params)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
