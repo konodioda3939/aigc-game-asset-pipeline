@@ -46,6 +46,9 @@ check_result.txt
 # ==== ComfyUI 完整安装（不提交，按 README 指引自行 clone）====
 ComfyUI/
 
+# ==== TripoSR 源码（克隆自 Stability AI，3D 生成运行依赖，保留本地不上传）====
+TripoSR/
+
 # ==== 系统文件 ====
 Thumbs.db
 Desktop.ini
