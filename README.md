@@ -15,7 +15,7 @@
 
 一个**从文字/草图到游戏资产**的 AI 管线，分八个阶段：
 
-```
+```text
 ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────┐
 │ 阶段 1    │─→│ 阶段 2    │─→│ 阶段 3    │─→│ 阶段 4    │─→│ 阶段 5    │─→│ 阶段 6    │─→│ 阶段 7    │─→│ 阶段 8    │
 │ LoRA 微调 │  │ Python   │  │ Unity    │  │ ControlNet│  │ TripoSR   │  │ PBR 材质  │  │ 工作流引擎 │  │ ComfyUI  │
@@ -43,12 +43,11 @@
 
 ## 🏗️ 项目结构
 
-```
+```text
 aigc-project/
 ├── README.md                       ← 📖 本文件
-├── CLAUDE.md                       ← AI 协作指南
-├── ControlNet阶段总结.md            ← ControlNet 阶段总结
-├── ControlNet 可控生成 — 实施计划.md ← ControlNet 原始计划
+├── CLAUDE.md                       ← AI 协作指南（轻量索引卡）
+├── docs/                           ← 技术踩坑备忘（TECHNICAL_NOTES.md，AI 按需查阅）
 │
 ├── data/
 │   ├── style_images/               ← 48张原始参考图（原神角色 AI 绘图）
@@ -142,7 +141,7 @@ Unity 菜单栏 → `Tools` → `AI Asset Generator` → 输入描述 → 点生
 
 **流程**：
 
-```
+```text
 Pinterest/Danbooru 收集
        ↓
 48张原神风格图
@@ -225,7 +224,7 @@ adapter_model.safetensors (12.2 MB)
 
 **窗口界面**：
 
-```
+```text
 ┌─────────────────────────────────────┐
 │  AI 资产生成器                       │
 │                                     │
@@ -314,11 +313,11 @@ ControlNet + 融合了 LoRA 的 UNet → 生成精修图
 - 输入图自动缩放（长边 > 768 等比缩小），避免 1024×1024 撑爆显存
 - Unity 插件支持模式切换 + 参考图拖入 + 实时预览
 
-> 📖 详细文档见 [ControlNet阶段总结.md](./ControlNet阶段总结.md)
+> 📖 技术细节见 [docs/TECHNICAL_NOTES.md](./docs/TECHNICAL_NOTES.md) 的 ControlNet 章节
 
 ---
 
-### 阶段 5：图片转 3D 模型 
+### 阶段 5：图片转 3D 模型
 
 **目标**：上传一张物体/角色图片，AI 自动生成带贴图的 3D 模型（.glb），可直接导入 Unity 作为 Prefab。
 
@@ -504,6 +503,7 @@ PBR 材质默认使用 Triplanar（三平面）纹理投射，**无视模型的 
 **目标**：把 4 条产线做成 ComfyUI 标准节点图（.json），通过 API 调用。
 
 **与阶段 7 的关系**：
+
 - 阶段 7 是轻量级 Python 引擎（复用全局单例，零新依赖）
 - 阶段 8 是标准 ComfyUI 工作流（行业标准工具，可视化节点图）
 - 两套系统**互不干扰**：ComfyUI 端口 8188，FastAPI 端口 8000
@@ -527,6 +527,7 @@ PBR 材质默认使用 Triplanar（三平面）纹理投射，**无视模型的 
 | `comfyui_remove_background` | d3cker | rembg 去背景 |
 
 **使用方式**：
+
 ```bash
 # 启动
 双击 ComfyUI/start_comfyui.bat
@@ -563,4 +564,3 @@ Body: {"prompt": <workflow_json>}
 MIT
 
 ---
-
