@@ -26,6 +26,8 @@
 └──────────┘  └──────────┘  └──────────┘  └──────────┘  └──────────┘  └──────────┘  └──────────┘  └──────────┘
 ```
 
+> **📊 项目进度全貌**：主项目 8 阶段（上图）✅ 已**全部完成**（「文字/草图 → 游戏资产」全管线打通）。在此之上还有 🚀 **求职增强计划**（针对岗位 JD 的深度优化）：✅ 推理优化（3.88→0.75s，**×5.2**）、✅ 3D 模型后处理（19 万面→8000 面，**Unity Tris 降 95.5%**）、⬜ 3D 动作（待做）。详见文末「🚀 求职增强计划」章节。
+
 ---
 
 ## 🎬 演示视频
@@ -60,8 +62,11 @@ aigc-project/
 │   └── comparison/                 ← 有无 LoRA 对比图
 │
 ├── inference_server/
-│   ├── main.py                     ← FastAPI 入口（/generate + /generate-controlled + /health）
+│   ├── main.py                     ← FastAPI 入口（/generate + /generate-3d + /post-process-mesh 等）
 │   ├── model_loader.py             ← SD + LoRA + ControlNet 加载器（全局单例）
+│   ├── mesh_postprocessor.py       ← 【项目D】后处理编排（subprocess 调 Blender + ZIP 打包）
+│   ├── blender_scripts/            ← 【项目D】bpy 脚本（Blender headless 调用）
+│   │   └── post_process_mesh.py    ←     减面+展UV+LOD 固化流程
 │   ├── start.bat                   ← 🚀 双击启动脚本
 │   ├── requirements.txt            ← Python 依赖
 │   ├── install_controlnet.bat      ← ControlNet 依赖安装
@@ -88,6 +93,12 @@ aigc-project/
 ├── scripts/                          ← 辅助脚本
 │   ├── lora_convert.py               ← PEFT→ComfyUI LoRA 格式转换
 │   └── create_workflows.py           ← 工作流 JSON 生成器
+│
+├── mesh_tools/                       ← 【项目D】Mesh 处理工具集
+│   ├── inspect_mesh.py               ← 模型体检（面数/UV/顶点色）
+│   ├── check_glb_attrs.py            ← glb 属性验证（COLOR_0/TEXCOORD_0）
+│   ├── test_postprocessor.py         ← 后处理单元测试
+│   └── D6_unity_report.md            ← D-6 Unity 验收报告（Tris 降 95.5%）
 │
 ├── 1.Lora生图.mp4                   ← 🎥 阶段1 演示
 ├── 2.ControlNet修图.mp4             ← 🎥 阶段2+4 演示
@@ -544,7 +555,72 @@ Body: {"prompt": <workflow_json>}
 
 ---
 
+## 🚀 求职增强计划（在 8 阶段之上的深度优化）
+
+> 主项目 8 个里程碑全部跑通后，针对目标岗位（AIGC + 游戏研发）JD 反复点名的关键词，做的 3 个深度增强。完整计划书见 [ENHANCEMENT_PLAN.md](ENHANCEMENT_PLAN.md)。
+
+| 项目 | 命中 JD 关键词 | 状态 | 核心成果 |
+|------|--------------|------|---------|
+| **C. 推理优化** | 推理加速 | ✅ 已完成 | SDPA + LCM-LoRA，**3.88s → 0.75s（×5.2）**，画质无损 |
+| **D. Mesh 后处理** | Mesh 数据处理 | ✅ 已完成 | 19.1 万面 → 8000 面，**Unity Tris 降 95.5%**，服务接口上线 |
+| **A. 3D 动作生成** | 3D 动作 / 动画 | ⬜ 待做 | 让 TripoSR 静态模型"动起来" |
+
+### 项目 C：推理优化（✅ 已完成）
+
+针对 8GB 显存约束优化 SD 1.5 + LoRA 推理服务：
+
+| 手段 | 通俗说 | 效果 |
+|------|--------|------|
+| **SDPA 注意力** | PyTorch 2.x 原生高效注意力，替代旧的 attention_slicing | 3.88s → 2.75s（×1.4），显存不变 |
+| **LCM-LoRA 4 步出图** | 少跑几步就出图（25 步 → 4 步） | 2.75s → 0.75s（再 ×3.7） |
+
+**综合：3.88s → 0.75s（×5.2），峰值显存 2.6/8GB，画质盲评 8/10 无损。** 以「快速模式」开关集成进 `/generate` 和工作流引擎，默认关，现有功能零影响。
+
+### 项目 D：3D 模型后处理（✅ 已完成）
+
+把 TripoSR 的"毛坯"3D 模型打磨成"游戏可用"。
+
+**背景**：TripoSR 输出 = 面数动辄十几万（游戏跑不动）+ 没有 UV（贴不上贴图）+ 只有顶点色。
+
+**四步打磨**：
+
+| 步骤 | 做什么 | 成果 |
+|------|--------|------|
+| **D-1 体检** | trimesh 测 14 个毛坯模型 | 均 ~17 万面、0/14 有 UV、全顶点色 |
+| **D-2 减面 + LOD** | Blender Decimate 砍面 | 19.1 万 → 8000/2500/800 三级 LOD，顶点色保留 |
+| **D-3 展 UV** | Smart UV Project | glb `TEXCOORD_0` NO→YES，解锁 Standard shader |
+| **D-5 服务集成** | 新增 `/post-process-mesh` 接口 | 上传 glb → 一键得 ZIP（减面 + UV + LOD + 预览）|
+| **D-6 Unity 验收** | 实测性能 | **Tris 575k→25.7k（降 95.5%）、Verts 1.2m→67.5k（降 94.4%）** |
+
+**技术路线**：服务用 Blender headless subprocess（纯 CPU，不占显存，不影响 SD/TripoSR 单例），blender.exe 三级路径回退。
+
+**新接口 `POST /post-process-mesh`**：
+
+| 参数 | 默认 | 说明 |
+|------|------|------|
+| `file` | 必填 | 待处理 glb（通常来自 `/generate-3d`）|
+| `target_faces` | 8000 | LOD0 目标面数 |
+| `uv_unwrap` | true | 展 UV（解锁 Standard shader）|
+| `lod_faces` | "2500,800" | 额外 LOD 面数，逗号分隔 |
+| `render_preview` | true | 渲染预览图 |
+
+返回 ZIP（各级 LOD glb + 预览图 + manifest.json）。完整验收报告见 [mesh_tools/D6_unity_report.md](mesh_tools/D6_unity_report.md)。
+
+### 项目 A：3D 动作生成（⬜ 待做）
+
+让 TripoSR 静态雕像"动起来"：自动绑骨（Mixamo / RigNet）+ 套现成动作 + AI 动作生成（MotionLCM 文本驱动 / 视频动捕）。详见 [ENHANCEMENT_PLAN.md](ENHANCEMENT_PLAN.md) 第三节。
+
+---
+
 ## 🎯 下一步
+
+**求职增强计划**（详见 [ENHANCEMENT_PLAN.md](ENHANCEMENT_PLAN.md)）：
+
+- [x] ~~项目 C 推理优化~~ ✅ SDPA + LCM，3.88→0.75s（×5.2）
+- [x] ~~项目 D 3D 模型后处理~~ ✅ 19 万→8000 面，Unity Tris 降 95.5%，`/post-process-mesh` 接口上线
+- [ ] **项目 A 3D 动作生成**（让模型"动起来"）
+
+**主项目后续优化**：
 
 - [x] ~~图片转 3D 模型~~ ✅ 管线已打通（TripoSR），需升级底模改善质量
 - [x] ~~PBR 材质批量生成~~ ✅ 管线已打通（StableMaterials），prompt → 完整材质球
