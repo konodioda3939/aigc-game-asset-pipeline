@@ -40,7 +40,7 @@ JD 反复点名的关键词：**图像/视频/3D 内容生成、多模态、3D �
 
 | 项目 | 命中 JD 关键词 | 状态 | 当前进度 | 简要备注 |
 |------|--------------|------|---------|---------|
-| **A. 3D 模型动作生成** | 3D 动作 | ⬜ 未开始 | 0% | 让 TripoSR 静态模型"动起来" |
+| **A. 3D 模型动作生成** | 3D 动作 | 🔄 收尾中 | 85% | A-1~A-3b 完成；MoMask 文生动作跑通（走路72帧 BVH+火柴人gif），重定向简化（手动/Unity 失败→gif 演示），剩 A-5 演示 |
 | **C. 推理优化** | 推理优化 | ✅ 已完成 | 100% | 3.88→0.75s(×5.2)，画质无损，已集成「快速模式」开关 |
 | **D. Mesh 后处理** | Mesh 数据处理 | ✅ 已完成 | 100% | 全部完成：减面+展UV+LOD+服务接口+Unity实测（Tris降95.5%）|
 | B. 视频生成（缓后） | 视频 | ⏸ 暂缓 | - | 见「六、缓后项目」 |
@@ -75,9 +75,12 @@ JD 反复点名的关键词：**图像/视频/3D 内容生成、多模态、3D �
 > **为什么分两步**：路线 1 能快速跑通"模型能动"的闭环，立刻有产出；路线 2 才是真正的"生成式 AI"，是面试讲故事的高光。先稳后亮。
 
 ### A.4 落地步骤
-- [ ] **A-1 调研对齐**：确认 TripoSR 当前导出格式（.glb/.obj？）、Unity 导入流程；选定绑骨方案（Mixamo 优先）
-- [ ] **A-2 绑骨闭环**：挑一个 TripoSR 模型走通"自动绑骨 → 导入 Unity → 套 Mixamo 动作 → 能播放"
-- [ ] **A-3 AI 动作生成**：接入 MotionLCM 或视频动捕，实现"文字/视频 → 动作 → 重定向到模型"
+- [x] **A-1 调研对齐** ✅ 2026-07-02：TripoSR 导出 .glb(默认)/.obj（[main.py:626-634](inference_server/main.py#L626-L634)）；Unity 导入同 D-6（glb 直拖，带动画 FBX 需配 Humanoid Rig + Animator）；绑骨方案 **Mixamo**。**两个坑**：① Mixamo 不认 glb，需 Blender 转 fbx；② 橙子非人形，先用 Mixamo 自带角色打通
+- [x] **A-2 绑骨闭环** ✅ 2026-07-02：用 Mixamo 自带角色（X Bot）走通"选动作→下 FBX→Unity Humanoid→Animator 播放"，做成按键 1/2/3 切换走/射/跑的交互 demo。主角为 Mixamo 自带角色（TripoSR 人形差，A-2c 再尝试上传自家模型）
+- [x] **A-3a 选型调研** ✅ 2026-07-02：对比 MotionLCM/MoMask/Kimodo/视频动捕(ViTPose+MotionBERT)，选定 **MoMask**（CVPR2024 文生动作 SOTA、**官方确认 CPU 可跑零显存**、输出 BVH、官方给 Mixamo 角色的 Blender 重定向方案 + mapping.json，完美复用项目 D 工具链）
+- [x] **A-3b-1 环境** ✅ 2026-07-02：clone MoMask + 独立 conda 环境（D:/anaconda3/envs/momask，管理员授权写权限）+ 装依赖（torch CPU 版、clip 本地 SSH 装、chumpy 摘除）
+- [x] **A-3b-2 生成** ✅ 2026-07-02：跑通 `gen_t2m.py`（CPU），"A person walks forward." → 72 帧 BVH + gif 预览 + npy
+- [x] **A-3b-3 重定向（简化收尾）** ✅ 2026-07-03：Blender 手动重定向 4 次失败 + Unity Humanoid 诡异（Hips 150° 校正未应用）→ 改用 MoMask 原始骨架（走路自然）+ 独立火柴人 gif 演示（npy + 真 kinematic chain，绕过 plot_script bug）
 - [ ] **A-4（可选）集成**：把动作生成挂到推理服务/工作流引擎，做成"一句话出带动画角色"
 - [ ] **A-5 演示与文档**：录对比视频（静态 vs 动起来）、写进 README/TECHNICAL_NOTES
 
@@ -87,10 +90,32 @@ JD 反复点名的关键词：**图像/视频/3D 内容生成、多模态、3D �
 3. 有可展示的演示视频和前后对比
 
 ### A.6 简历 / 面试话术（量化版，做完填数字）
-> "基于 TripoSR 输出构建 3D 角色自动绑骨与动作生成管线，集成 Mixamo 自动绑骨 + MotionLCM 文本驱动动作生成，实现从文字描述到 Unity 可用带动画 3D 角色的端到端流程，单角色动效生成耗时 < __s。"
+> "构建 3D 角色动作生成双路线管线：① 工程闭环——Mixamo 自动绑骨 + Unity Humanoid 重定向，跑通'选动作→FBX→Unity 按键切换播放'交互 demo（走/射/跑 3 动作）；② 生成式 AI——集成 **MoMask（CVPR2024 文生动作 SOTA，FID 0.045）**，输入文字 → CPU 生成 72 帧人形走路 BVH（22 骨骼；Hips 前移 4m/3.6s、双脚交替+抬腿摆动相，数据验证自然走路）。攻坚：MoMask 权重 Google Drive 配额限流 → 转 HF 镜像 requests 直连；huggingface_hub 1.x hf-xet 绕过 hf-mirror → 禁用走 VPN；numpy 1.21/torch 1.12 API 冲突 → 锁版本。独立 conda 环境 CPU 推理零显存，不碰主管线。"
 
 ### A.7 状态与日志
 - 2026-06-30：计划立项，未开工。
+- 2026-07-02：✅ 完成 **A-1 调研对齐**。Blender MCP 已连通（场景含项目 D 橙子 `orange_LOD0_8000`）。确认事实：① TripoSR `/generate-3d` 导出 **.glb（默认）/.obj**（[main.py:626-634](inference_server/main.py#L626-L634)，`output_format` 参数控制）；② Unity 导入流程同 D-6（glb 直拖），但带动画 FBX 需额外配 Humanoid Rig + Animator Controller，属新内容；③ 绑骨方案锁定 **Mixamo**。**发现两个坑**：🚨 Mixamo 只认 .fbx/.obj、不认 .glb → 需 Blender 转 fbx（Blender MCP 可做）；🚨 Mixamo 是人形绑骨，橙子（球体）不能当主角。**与用户确认 A-2 方案**：先用 Mixamo 自带角色（X Bot）打通"选动作→下 FBX→Unity 播放"链路（必成功），再尝试上传自定义人形模型。
+- 2026-07-02：✅ 完成 **A-2 绑骨闭环**（路线 1 工程闭环主体）。Mixamo 自带角色 X Bot → 下载 FBX for Unity（Walk / Fast Run / Shooting 三动作，存 `animation/`）→ Unity 导入 → Rig 配 Humanoid → Animator Controller + 按键切换 demo（按 1/2/3 切走/射/跑，重复按从头播）。
+  - **主角说明**：用 Mixamo 自带角色（非 TripoSR 输出）。原因：① Mixamo 是人形绑骨，橙子（项目 D 模型）不可用；② TripoSR 对人形/二次元效果差（CLAUDE.md 已知短板）。先用自带角色打通链路最稳，A-2c 再尝试上传自家模型。
+  - **踩坑**（Unity Animator 新手向，已同步 `docs/TECHNICAL_NOTES.md`「3D 动作生成」）：① 配 Humanoid 须在 Project 窗口点 fbx 源文件，不能在 Hierarchy 点场景实例（后者只显示 Transform，无 Rig 标签）；② Any State→State 过渡条件持续满足时，默认 `Can Transition To Self=true` 导致动画反复从头播（抖动），须取消勾选；③ `SetInteger` 设同值不触发重播（已在 Walk 再按 1 无反应），改用 `animator.Play("StateName", 0, 0f)` 每次从头播；④ 换 Play 脚本后须删掉 Any State 过渡线，否则 actionIndex 恒为 0 把角色从射击/快跑拉回走路；⑤ Mixamo clip 常都叫 `mixamo.com`，须右键 Rename 成 Walk/Shoot/Run。
+  - **产物**：`animation/` 下 3 个 fbx；Unity 项目内 `PlayerAnim.controller` + `ActionSwitcher.cs`。
+- 2026-07-02：✅ 完成 **A-3a 选型调研**（WebSearch 调研 + 精读 MoMask GitHub README）。对比候选：
+  - 文生动作：**MoMask**（CVPR2024，FID 0.045 SOTA）、MotionLCM（ECCV2024，~8GB 实时）、NVIDIA Kimodo（2025，需 17GB 显存超 8GB 天花板，pass）、MMM（FID 0.089）。
+  - 视频动捕：ViTPose（2D）→ MotionBERT（3D lifting）→ BVH，成熟但环节多。
+  - **选定 MoMask**：① 官方确认 **WebUI demo 在 CPU 上跑通、No GPU required**（完美契合 8GB 铁律，零显存不与主管线抢资源）；② `gen_t2m.py --text_prompt "..."` 一行生成，**输出 BVH**（Blender/Unity 通用动作格式）；③ 官方 README 给出 **Blender 重定向方案**（keemap.rig.transfer 插件 + `assets/mapping.json` 骨骼映射，专门适配 Mixamo 角色），与 A-2 的 Mixamo 角色 + 项目 D 的 Blender MCP 完美复用。
+  - **落地链路**：文字 → MoMask(`gen_t2m.py`, CPU) → BVH → Blender(keemap + `mapping.json` 重定向到 Mixamo 角色) → 带动画 FBX → Unity 播放。
+  - **两个风险点**：① MoMask 预训练权重用 gdown 从 **Google Drive 下载**（国内可能失败，备选：代理/手动/HF 镜像）；② 依赖 PyTorch 1.7.1 / Python 3.10（与主管线 GPUpytorch-env 3.11 + PyTorch2.11 冲突），**须建独立 conda 环境**（momask），不碰主管线。
+- 2026-07-02：✅ 完成 **A-3b-1 环境 + A-3b-2 生成**（路线 2 核心突破：文字 → AI → 3D 动作 BVH）。
+  - **A-3b-1 环境**（踩坑密集）：① conda 默认把环境建到 C 盘用户目录，且 `D:/anaconda3/envs` 仅管理员可写 → 用户开**管理员 PowerShell** 跑 `icacls "D:\anaconda3\envs" /grant 15703:(OI)(CI)M /T`（+ pkgs）授权，重建 momask 到 D 盘，并删 C 盘 ai_env/momask；② requirements 改造：`environment.yml` 是 Linux 专用 → 用 `requirements.txt`（Python 3.10）；torch 换 CPU 版（1.3GB→150MB）；`chumpy` 老 setup.py（`import pip`）装不上 → 摘除（生成 BVH 用不到）；`clip @ git+https` 被 GitHub HTTPS 重置 → **SSH clone 到本地** + `clip @ file:///D:/aigc-project/CLIP`；scipy/sklearn 装最新与 numpy 1.21.5 打架 → 锁 `scipy==1.7.3` / `scikit-learn==1.0.2`；`matplotlib==3.1.3` 不兼容 Python 3.10 → 放宽。
+  - **A-3b-2 权重下载**（最折腾）：Google Drive 被 gdown 走 drive.google.com → 开 VPN（香港）连通，但 **Google Drive 配额限流**（"many accesses"）→ 转 HF 镜像：andrewatef/MoMask-test 权重不全（仅评估版）、MeYourHint/MoMask 无权重 → 找到 **geedog/momask-codes-models**（全套 HumanML3D 权重，目录名与 `gen_t2m` 默认参数完全匹配）。下载：huggingface_hub 1.x 的 **hf-xet 后端**绕过 hf-mirror 直连被墙，`HF_HUB_DISABLE_XET=1` 未生效 → **绕开 huggingface_hub，用 requests 直连**（`trust_env=True` 走 VPN 从 huggingface.co 下 9 文件）成功（约 200MB）。
+  - **A-3b-2 生成**：numpy 1.21.5 太旧（API 0xe）致 `torch.numpy()` 报"Numpy is not available"（torch 1.12 编译针对 API 0x10）→ 升级 `numpy==1.23.5`；matplotlib 3.5+ 的 `ax.lines`/`ax.dist` 只读 → 改 plot_script 兼容；mp4 需 ffmpeg 未装 → **改存 gif**（pillow 自带）。最终 `python gen_t2m.py --gpu_id -1 --text_prompt "A person walks forward."` 跑通，输出 72 帧 BVH + gif 预览 + npy（CLIP ViT-B/338MB 首次下载缓存到 ~/.cache/clip）。
+  - **产物**：`momask-codes/generation/exp1/animations/0/sample0_repeat0_len72.{bvh,_ik.bvh,.gif,_ik.gif}` + `joints/0/*.npy`。
+- 2026-07-03：⚠️ **A-3b-3 重定向受阻 → 简化收尾**（用户确认）。MoMask BVH → Mixamo 角色重定向尝试：
+  - **Blender 手动 4 次失败**：① Copy Rotation（world, 无校正）→ mesh 扭曲（mapping.json 的 Hips `CorrectionFactorX=2.618rad=150°` 未应用）；② Copy Transforms（world）→ 单位错位（脚飞地下 -81m，BVH 与 Mixamo 单位不匹配）；③ local euler + CorrectionFactor → 脚飞天上 87m（骨骼局部坐标系矩阵运算错）；④ Copy Rotation + 校正 quaternion → 更扭曲。**根因**：mapping.json 的 18 骨骼校正（Hips 150° + 各骨 quaternion）需 keemap 插件精确应用，手写矩阵极易搞反。
+  - **Unity Humanoid 重定向**：诡异（腰部插屁股）——Unity 自动配 Avatar 未应用 Hips 150° 校正，脊柱插进骨盆。Enforce T-pose 无效（rest pose 锁在 FBX）。
+  - **简化方案**：MoMask 动作本身 OK（Blender 原始 22 骨骼走路自然，用户 Space 播放确认）→ 绕过重定向，用 npy 关节坐标 + 真 kinematic chain 画**火柴人 gif**（独立脚本 `stickfigure.py`，绕过 plot_3d_motion 的 `ax.lines` bug；视角 `view_init(elev=15, azim=135)` 斜俯视）。
+  - **正解备忘**（未做）：MoMask 官方推荐 **keemap.rig.transfer** Blender 插件（mapping.json 给它写的，自动应用校正）是重定向到 Mixamo 的正解；本轮因 keemap 是 UI 工具 bpy 调用复杂 + 时间成本，简化收尾。
+  - **产物**：`momask-codes/generation/exp1/walk_stickfigure.gif`（火柴人走路 72 帧，1.2MB）+ `stickfigure.py`。
 
 ---
 
@@ -269,7 +294,7 @@ TripoSR 出的 3D 模型是"毛坯"——面数动辄十几万（游戏跑不动
 
 1. ~~**项目 C（推理优化）**~~ ✅ **已完成**（3.88→0.75s ×5.2）。
 2. ~~**项目 D（Mesh 后处理）**~~ ✅ **已完成**（D-1~D-3 + D-5 + D-6：减面/展UV/LOD + 服务接口 `/post-process-mesh` + Unity 实测 Tris 降 95.5%）。
-3. **🥇 下一个做项目 A（3D 动作）**：故事性最强但环节最多，让 TripoSR 模型"动起来"。也可先做可选的 D-4 贴图烘焙。
+3. **项目 A（3D 动作）🔄 收尾**：A-1~A-3b ✅（MoMask 文生动作跑通 + 火柴人 gif 演示；重定向到 Mixamo 失败→简化为 MoMask 原始动作演示）；**剩 A-5**（录演示视频 + README 同步）。A-2c 上传自家模型绑骨、视频动捕、keemap 重定向为可选增强。
 
 > 💡 也可按用户意愿调整顺序。开工任一项目前，AI 应先把对应项目的「落地步骤」拆成可执行清单，用大白话向用户说明，再动手。
 

@@ -13,6 +13,7 @@
 - [PBR 材质 / StableMaterials](#pbr-材质--stablematerials)
 - [工作流引擎（里程碑 7）](#工作流引擎里程碑-7)
 - [ComfyUI 工作流（里程碑 8）](#comfyui-工作流里程碑-8)
+- [3D 动作生成（项目 A）](#3d-动作生成项目-a)
 - [网络注意事项](#网络注意事项)
 
 ---
@@ -323,6 +324,33 @@ GET http://127.0.0.1:8188/view?filename=...&type=output
 - `RemoveBackground` 节点输出 MASK 而非 IMAGE，素材图标工作流暂不含去背景步骤
 - Flowty TripoSR 使用旧版 ViT 键名，HF 新版 checkpoint 可能需要键名转换（同 model_loader.py 的 `_remap_triposr_keys`）
 - StableMaterials 首次加载需 30-60 秒（2-3GB 权重），后续调用秒级
+
+---
+
+## 3D 动作生成（项目 A）
+
+> 让 TripoSR 输出的静态模型"动起来"。路线 1（Mixamo 工程闭环）+ 路线 2（AI 生成动作）。
+
+**Mixamo 绑骨 + Unity 播放流程（路线 1，2026-07-02 打通）**：
+- Mixamo（Adobe 免费在线工具）：选角色 → 选动作 → Download 选 **FBX for Unity** → 得 `角色@动作.fbx`。Mixamo 是人形绑骨，**只接受 .fbx/.obj 上传，不吃 .glb**（TripoSR 默认输出 glb，须 Blender 转 fbx）。
+- Unity 导入：Project 窗口点 fbx → Inspector **Rig** 标签 → Animation Type = **Humanoid** → Apply。
+- Animator 播放：建 Animator Controller → fbx 展开拖三角形动画片段进画布（state）→ 挂到角色 Animator 组件的 Controller 槽。
+
+**Unity Animator 踩坑（新手高频）**：
+1. **配 Humanoid 找不到 Rig 标签**：必须在 **Project 窗口点 fbx 源文件**（仓库原件），不能在 Hierarchy 点场景实例（舞台角色，只显示 Transform）。两个窗口可能同名，认 Project 里灰色文件图标。
+2. **Any State 自循环抖动**：Any State→State 过渡若条件持续满足，默认 `Can Transition To Self=true` 会反复重入，动画从头反复播（抖动）。解决：选中过渡线，Inspector 取消勾选 Can Transition To Self。
+3. **参数过渡无法重复触发同动作**：`SetInteger` 设同值（如已在 Walk 再按走路的键）Animator 不视为变化，不重播。改用 `animator.Play("StateName", 0, 0f)` 直接播放，每次按从头播。
+4. **Play 脚本须删 Any State 过渡**：若保留 Any State→Walk（条件 actionIndex==0），换 Play 脚本后参数恒为初始值，过渡持续把角色从其他动作拉回走路。解决：删三条 Any State 过渡线，只留 Entry→Walk 默认入口。
+5. **Mixamo clip 命名**：Mixamo FBX 展开后动画片段常都叫 `mixamo.com`，多个 state 重名混乱，须右键 Rename 成可读名（Walk/Shoot/Run）。
+
+**Animator 画布导航**：中键拖动 = 平移，滚轮 = 缩放，选中按 `F` = 聚焦。
+
+**MoMask BVH → Mixamo 重定向踩坑（A-3b-3，简化收尾）**：
+- `assets/mapping.json` 含 18 骨骼校正因子（Hips `CorrectionFactorX=2.618rad=150°` + QuatCorrection 等），是 MoMask 官方给 **keemap.rig.transfer** 插件写的。手动应用极易错（4 次失败）：Copy Rotation world 无校正→扭曲；Copy Transforms world→单位错位（BVH vs Mixamo 比例不匹配，脚飞地下 -81m）；local euler 加校正→局部坐标系矩阵错（脚飞天上 87m）；world quaternion 校正→更扭曲。
+- Unity Humanoid 重定向也诡异：自动配 Avatar 未应用 Hips 150° 校正→腰部插屁股。Enforce T-pose 无效（rest pose 锁在 FBX）。
+- **正解**：keemap 插件（官方推荐，自动应用 mapping.json 校正）。
+- **简化方案**（本项目采纳）：MoMask 原始骨架走路自然（Blender 播放验证），用 npy + 真 kinematic chain（`paramUtil.t2m_kinematic_chain`）画火柴人 gif 演示（`stickfigure.py`），绕过重定向。matplotlib 3D gif 视角：`view_init(elev=15, azim=135)`（斜俯视，azim 调方位看不同侧）。
+- matplotlib 3D 火柴人坑：`ax.lines=[]`/`ax.dist` 在 3.5+ 只读（改 `for l in list(ax.lines): l.remove()` / try）；mp4 需 ffmpeg→改 gif（pillow 自带）；FuncAnimation 每帧 `ax.cla()` 重画防叠加。
 
 ---
 
