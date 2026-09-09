@@ -53,7 +53,7 @@ MODEL_REGISTRY = {
     },
     "realistic": {
         "label": "写实风",
-        "base_id": "SG161222/Realistic_Vision_V5.1_no_inpaint",
+        "base_id": "SG161222/Realistic_Vision_V5.1_noVAE",  # 修正：原 _no_inpaint 仓库名不存在（HF 401）
         "lora_dir": None,
         "needs_download": True,
         "lcm_compatible": True,   # SD1.5（Realistic Vision）
@@ -148,15 +148,35 @@ def _build_pipeline(spec: dict) -> StableDiffusionPipeline:
     base_id = spec["base_id"]
     label = spec.get("label", base_id)
 
-    # --- 加载基座模型 ---
+    # --- 加载基座模型（hf-mirror 失败自动回退直连 huggingface.co）---
     print(f"[model_loader] 正在加载基座模型: {base_id}（{label}）...", flush=True)
-    pipe = StableDiffusionPipeline.from_pretrained(
-        base_id,
-        torch_dtype=dtype,
-        safety_checker=None,
-        cache_dir=str(CACHE_DIR),
-    )
-    pipe.scheduler = DPMSolverMultistepScheduler.from_config(pipe.scheduler.config)
+    saved_endpoint = os.environ.get("HF_ENDPOINT")
+    pipe = None
+    for endpoint_name in ["hf-mirror", "直连"]:
+        try:
+            if endpoint_name == "直连" and saved_endpoint:
+                os.environ.pop("HF_ENDPOINT", None)
+            print(f"[model_loader] 尝试 {endpoint_name}...", flush=True)
+            pipe = StableDiffusionPipeline.from_pretrained(
+                base_id,
+                torch_dtype=dtype,
+                safety_checker=None,
+                cache_dir=str(CACHE_DIR),
+            )
+            break
+        except Exception as e:
+            print(f"[model_loader] ⚠️ {endpoint_name} 加载失败: {type(e).__name__}: {e}", flush=True)
+            if endpoint_name == "直连":
+                raise
+    if saved_endpoint:
+        os.environ["HF_ENDPOINT"] = saved_endpoint
+    # 兼容修正：部分仓库（如 Realistic_Vision V5.1）scheduler 配置为 algorithm_type=deis，
+    # 新版 diffusers 默认 final_sigmas_type=zero 与 deis 不兼容会抛 ValueError → 强制 sigma_min。
+    sched_cfg = dict(pipe.scheduler.config)
+    if sched_cfg.get("algorithm_type") == "deis":
+        sched_cfg["final_sigmas_type"] = "sigma_min"
+        print("[model_loader] 已修正 scheduler 兼容性（deis → final_sigmas_type=sigma_min）", flush=True)
+    pipe.scheduler = DPMSolverMultistepScheduler.from_config(sched_cfg)
     print("[model_loader] 基座模型加载完成。", flush=True)
 
     # --- 可选 LoRA 权重融合 ---
