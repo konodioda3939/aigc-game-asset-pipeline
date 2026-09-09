@@ -643,7 +643,12 @@ Body: {"prompt": <workflow_json>}
 - **`GET /models`**：列出全部模型 + 当前活动模型，供客户端下拉框自动装配
 - **`/health` 动态化**：`model` 字段实时反映活动模型（不再是写死的全家桶描述）
 
-**游戏运行时集成（IGC）**：[ActionArena-Demo](https://github.com/konodioda393939/ActionArena-Demo) 游戏内按 `G` 呼出面板 → 选模型 → 输入 Prompt → HTTP 调本服务 `/generate`（fast_mode）→ 生成贴图热替换角色材质 `_MainTex`。实测（RTX 4060 Laptop）：**anime / realistic / texture 三模型全部 200 OK**——anime 走 LCM 6 步，realistic 走 LCM 6 步（~2.5s 出高质量写实人像），texture 自动降级 DPM 20 步；512×512 纹理直接平铺上角色无违和；无服务时游戏自动进离线模式，不影响游玩。
+**游戏运行时集成（IGC）**：[ActionArena-Demo](https://github.com/konodioda393939/ActionArena-Demo) 游戏内按 `G` 呼出面板 → 选模型 → 输入 Prompt → HTTP 调本服务 `/generate`（fast_mode）→ 生成贴图热替换角色材质 `_MainTex`。实测（RTX 4060 Laptop）：**anime / realistic / texture 三模型全部验证通过**（生成 + 游戏内套用）——anime / realistic 走 LCM 6 步（~2.5s），texture 自动降级 DPM 20 步。
+
+**三模型定位与适用边界**：
+- `texture` = 游戏内换皮主力：无缝平铺**静态材质/图案**（鳞甲、木石金属、织物、地面）。⚠️ 动态材质（水/火/烟）超出其训练分布，会退化为邻近静态材质（如 `water` → 泥土/湿石）；正经 PBR 材质球制作走 `/generate-pbr`
+- `anime` + 自训 LoRA = 编辑器侧 2D 资产线（图标/立绘/概念图），不做角色 UV 贴图（「贴纸」问题）
+- `realistic` = 架构通用性证明（SD1.5/SD2.x 混部 + 热切换）+ 写实概念图
 
 > 踩坑备忘（realistic 实测时修复）：① 注册表初版仓库名 `Realistic_Vision_V5.1_no_inpaint` 不存在（HF 匿名访问返回 401，易误判为鉴权问题），正确为 `Realistic_Vision_V5.1_noVAE`；② 该仓库 scheduler `algorithm_type=deis` 与新版 diffusers 默认 `final_sigmas_type=zero` 冲突，`_build_pipeline` 已做自动修正（deis → sigma_min）；③ 基座加载失败时 hf-mirror 自动回退直连。
 
@@ -660,6 +665,7 @@ Body: {"prompt": <workflow_json>}
 - [x] ~~游戏美术工作流引擎~~ ✅ 4 条标准化产线，零新模型依赖
 - [x] ~~ComfyUI 游戏美术工作流~~ ✅ 4 套 .json 节点图 + API
 - [x] ~~实测 `realistic` 模型~~ ✅ LCM 6 步 ~2.5s 出高质量写实人像（2026-09-09，修 3 处加载阻塞后）
+- [ ] **UV 感知角色贴图生成**：角色 UV 展开图作底图 + ControlNet（canny/inpaint）img2img 重绘，让 anime/realistic 真正可用于角色换皮（脸画在脸的 UV 区、衣服画在衣服的 UV 区）；现有 ControlNet 依赖可复用
 - [ ] 升级 3D 底模（TRELLIS / Unique3D，改善角色和背面质量）
 - [ ] 训练自己的 ControlNet（用游戏素材风格）
 - [ ] 批量生成 + 多种子变体（一次生成多张，挑最好的）
