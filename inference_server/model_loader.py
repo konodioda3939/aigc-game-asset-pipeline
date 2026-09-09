@@ -37,6 +37,38 @@ MODEL_NAME = "gsdf/Counterfeit-V2.5"
 LORA_DIR = Path(r"D:\aigc-project\lora_output")
 CACHE_DIR = Path(r"D:\aigc-project\cache\hub")
 
+# ===== 模型注册表（多模型切换，项目 ⑤ 扩展）=====
+# 每条：base_id 是 HF 仓库 id；lora_dir 非空 → 构建时 PeftModel merge_and_unload 融合进 UNet（如原神 LoRA）；
+# needs_download 仅作标记（首用时 from_pretrained 会自动下载到 CACHE_DIR，走 hf-mirror）；
+# prompt_suffix 非空 → /generate 自动拼到 prompt 末尾（texture 模式加纹路引导词，压住人脸）；
+# lcm_compatible → 能否叠 SD1.5 LCM-LoRA：UNet cross_attention_dim 必须是 768（SD1.5）。
+#   SD2.x 模型是 1024，与本项目的 lcm-lora-sdv1-5 不兼容，fast_mode 会自动降级走标准 DPM（见 main.py /generate）。
+MODEL_REGISTRY = {
+    "anime": {
+        "label": "二次元（原神风）",
+        "base_id": MODEL_NAME,
+        "lora_dir": str(LORA_DIR),
+        "needs_download": False,
+        "lcm_compatible": True,   # SD1.5（Counterfeit）
+    },
+    "realistic": {
+        "label": "写实风",
+        "base_id": "SG161222/Realistic_Vision_V5.1_no_inpaint",
+        "lora_dir": None,
+        "needs_download": True,
+        "lcm_compatible": True,   # SD1.5（Realistic Vision）
+    },
+    "texture": {
+        "label": "纹理/图案",
+        "base_id": "dream-textures/texture-diffusion",
+        "lora_dir": None,
+        "needs_download": True,
+        "lcm_compatible": False,  # ⚠️ SD2.x（cross_attention_dim=1024），不能叠 SD1.5 LCM-LoRA
+        "prompt_suffix": "seamless tileable texture, flat, game asset, no human, no face",
+    },
+}
+DEFAULT_MODEL = "anime"
+
 # ControlNet 模型 HuggingFace ID 映射
 # ControlNet 模型 ID
 # modelscope: 国内镜像，优先使用（大文件下载更稳）
@@ -75,6 +107,10 @@ _pbr_lock = threading.Lock()  # PBR 管线互斥锁（防止并发卸载冲突�
 
 _lcm_active = False           # LCM 快速模式是否启用（项目 C 推理优化）
 
+# ===== 多模型切换状态（项目 ⑤ 扩展）=====
+_active_model_key = None          # 当前已加载的模型 key（None=尚未加载）
+_swap_lock = threading.Lock()     # 换装互斥锁（_pipeline 原本无锁，防并发 /generate 竞态换装）
+
 
 # ===== 设备检测 =====
 
@@ -100,23 +136,22 @@ def _detect_device():
 
 # ===== txt2img 管线（向后兼容） =====
 
-def load_pipeline() -> StableDiffusionPipeline:
+def _build_pipeline(spec: dict) -> StableDiffusionPipeline:
     """
-    加载 txt2img 管线 + LoRA 权重。
-    服务启动时调用一次，之后全局复用。
+    根据注册表 spec 构建一条 txt2img 管线：
+      基座 from_pretrained → DPMScheduler → 可选 LoRA merge_and_unload → to(device) → 填 _shared_components。
+    不触碰全局 _pipeline（由调用方赋值），便于多模型换装复用同一构建逻辑。
     """
-    global _pipeline, _shared_components
-
-    if _pipeline is not None:
-        print("[model_loader] txt2img 管线已加载，复用现有实例。", flush=True)
-        return _pipeline
+    global _shared_components
 
     device, dtype = _detect_device()
+    base_id = spec["base_id"]
+    label = spec.get("label", base_id)
 
     # --- 加载基座模型 ---
-    print(f"[model_loader] 正在加载基座模型: {MODEL_NAME} ...", flush=True)
+    print(f"[model_loader] 正在加载基座模型: {base_id}（{label}）...", flush=True)
     pipe = StableDiffusionPipeline.from_pretrained(
-        MODEL_NAME,
+        base_id,
         torch_dtype=dtype,
         safety_checker=None,
         cache_dir=str(CACHE_DIR),
@@ -124,16 +159,19 @@ def load_pipeline() -> StableDiffusionPipeline:
     pipe.scheduler = DPMSolverMultistepScheduler.from_config(pipe.scheduler.config)
     print("[model_loader] 基座模型加载完成。", flush=True)
 
-    # --- 加载 LoRA 权重 ---
-    lora_weights = LORA_DIR / "adapter_model.safetensors"
-    if lora_weights.exists():
-        print(f"[model_loader] 正在加载 LoRA 权重: {lora_weights}", flush=True)
-        unet = PeftModel.from_pretrained(pipe.unet, str(LORA_DIR))
-        pipe.unet = unet.merge_and_unload()
-        pipe.unet = pipe.unet.to(device, dtype=dtype)
-        print("[model_loader] LoRA 权重已融合进 UNet。", flush=True)
-    else:
-        print("[model_loader] ⚠️ 未找到 LoRA 权重文件", flush=True)
+    # --- 可选 LoRA 权重融合 ---
+    lora_dir = spec.get("lora_dir")
+    if lora_dir:
+        lora_path = Path(lora_dir)
+        lora_weights = lora_path / "adapter_model.safetensors"
+        if lora_weights.exists():
+            print(f"[model_loader] 正在加载 LoRA 权重: {lora_weights}", flush=True)
+            unet = PeftModel.from_pretrained(pipe.unet, str(lora_path))
+            pipe.unet = unet.merge_and_unload()
+            pipe.unet = pipe.unet.to(device, dtype=dtype)
+            print("[model_loader] LoRA 权重已融合进 UNet。", flush=True)
+        else:
+            print(f"[model_loader] ⚠️ 未找到 LoRA 权重文件: {lora_weights}", flush=True)
 
     # --- 移到设备 + 优化 ---
     pipe = pipe.to(device)
@@ -149,12 +187,28 @@ def load_pipeline() -> StableDiffusionPipeline:
         "vae": pipe.vae,
         "text_encoder": pipe.text_encoder,
         "tokenizer": pipe.tokenizer,
-        "unet": pipe.unet,          # ← 已融合 LoRA 的 UNet
+        "unet": pipe.unet,          # ← 已融合 LoRA 的 UNet（无 LoRA 则是原版 UNet）
         "scheduler": pipe.scheduler,
     }
 
-    _pipeline = pipe
-    print(f"[model_loader] txt2img 管线就绪。", flush=True)
+    print(f"[model_loader] 管线构建完成（{label}）。", flush=True)
+    return pipe
+
+
+def load_pipeline() -> StableDiffusionPipeline:
+    """
+    加载【默认】txt2img 管线（DEFAULT_MODEL=anime）。
+    向后兼容：服务 startup 与旧调用方仍用本函数；多模型按需切换请用 get_pipeline_for_model()。
+    """
+    global _pipeline, _active_model_key
+
+    if _pipeline is not None:
+        print("[model_loader] txt2img 管线已加载，复用现有实例。", flush=True)
+        return _pipeline
+
+    _pipeline = _build_pipeline(MODEL_REGISTRY[DEFAULT_MODEL])
+    _active_model_key = DEFAULT_MODEL
+    print(f"[model_loader] txt2img 管线就绪（默认 {DEFAULT_MODEL}）。", flush=True)
     return _pipeline
 
 
@@ -163,6 +217,78 @@ def get_pipeline() -> StableDiffusionPipeline | None:
     if _pipeline is None:
         return load_pipeline()
     return _pipeline
+
+
+# ===== 多模型换装（项目 ⑤ 扩展）=====
+
+def _drop_current_pipeline():
+    """
+    丢弃当前 txt2img 管线 + 失效共享组件/ControlNet 缓存，释放显存。
+    ControlNet 管线与本管线共享同一 UNet（_shared_components），换基座后必须清掉，
+    否则 ControlNet 会带着旧 UNet 出图；清掉后按需懒重建（见 get_controlnet_pipeline）。
+    """
+    global _pipeline, _shared_components, _lcm_active
+    _pipeline = None
+    _shared_components = None
+    _controlnet_pipelines.clear()
+    _controlnet_models.clear()
+    _lcm_active = False  # 新管线没有 LCM-LoRA；fast_mode 会通过 ensure_lcm_mode 重新挂
+
+    import gc
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    print("[model_loader] 已卸载旧管线并释放显存。", flush=True)
+
+
+def get_pipeline_for_model(model_key: str) -> StableDiffusionPipeline:
+    """
+    按 key 取 txt2img 管线；若与当前活动模型不同则【换装】（卸旧的、构建新的）。
+    线程安全（_swap_lock）：并发 /generate 不会同时换装导致串模型。
+    命中当前模型时直接返回，零开销。
+    """
+    global _pipeline, _active_model_key
+
+    if model_key not in MODEL_REGISTRY:
+        raise ValueError(
+            f"未知模型 key: '{model_key}'。可用: {list(MODEL_REGISTRY.keys())}"
+        )
+
+    with _swap_lock:
+        # 命中：当前已是该模型，直接复用
+        if _pipeline is not None and _active_model_key == model_key:
+            return _pipeline
+
+        spec = MODEL_REGISTRY[model_key]
+        print(f"[model_loader] 切换模型 → {model_key}（{spec.get('label', '')}）...", flush=True)
+
+        # 换装前先卸载旧管线（首次加载时 _pipeline 为 None，跳过）
+        if _pipeline is not None:
+            _drop_current_pipeline()
+
+        # 构建新管线（本地缓存命中 ~8s；首次用该模型会先从 hf-mirror 下载到 CACHE_DIR）
+        _pipeline = _build_pipeline(spec)
+        _active_model_key = model_key
+        print(f"[model_loader] 模型就绪: {model_key}", flush=True)
+        return _pipeline
+
+
+def get_active_model_key() -> str | None:
+    """当前已加载的模型 key（None=尚未加载）。"""
+    return _active_model_key
+
+
+def get_model_info() -> list:
+    """返回注册表里所有模型的信息（含当前是否活动），供 /models、/health 用。"""
+    return [
+        {
+            "key": key,
+            "label": spec.get("label", key),
+            "needs_download": spec.get("needs_download", False),
+            "active": (_active_model_key == key),
+        }
+        for key, spec in MODEL_REGISTRY.items()
+    ]
 
 
 # ===== LCM 快速模式（项目 C 推理优化）=====
@@ -212,9 +338,9 @@ def _download_lcm_lora() -> str:
             os.environ.pop("HF_ENDPOINT", None)
 
 
-def ensure_lcm_mode(active: bool) -> None:
+def ensure_lcm_mode(active: bool) -> bool:
     """
-    幂等地切换 txt2img 管线到 / 离开 LCM 快速模式。
+    幂等地切换 txt2img 管线到 / 离开 LCM 快速模式。返回最终是否处于 LCM 模式。
 
     active=True:  加载 LCM-LoRA + 切 LCMScheduler（4-8 步出图，快约 5 倍）
     active=False: 卸载 LCM-LoRA + 恢复 DPMSolverMultistepScheduler（标准 25 步）
@@ -222,25 +348,43 @@ def ensure_lcm_mode(active: bool) -> None:
     已融合的角色 LoRA 不受影响（已 merge_and_unload 进 UNet 基础权重）。
     ControlNet 管线共享同一个 UNet，因此切回标准模式时务必卸载 LCM-LoRA，
     否则 ControlNet 会带着 LCM-LoRA 却用 DPM scheduler，出图会崩。
+
+    ⚠️ 永不抛异常：若 load 失败（如 SD2.x 模型叠 SD1.5 LCM-LoRA 架构不兼容、或权重损坏），
+    会清理残留 adapter 并回退标准模式、返回 False，由调用方决定是否降级（见 main.py /generate）。
+    残留空 adapter 是真实陷阱：load 中途抛异常时 peft 已建好 adapter 结构但 _lcm_active 未置 True，
+    下次再 load 会与残留 adapter 形状冲突 → 持续 500。故加载前先防御性 unload。
     """
     global _lcm_active
     pipe = get_pipeline()
     if pipe is None:
-        return
+        return False
 
     if active and not _lcm_active:
-        lcm_file = _download_lcm_lora()
-        print(f"[model_loader] → 启用 LCM 快速模式...", flush=True)
-        pipe.load_lora_weights(lcm_file)
-        pipe.scheduler = LCMScheduler.from_config(pipe.scheduler.config)
-        _lcm_active = True
-        print(f"[model_loader] LCM 已启用（建议 steps=4-8, cfg=1.0-2.0）。", flush=True)
+        try:
+            pipe.unload_lora_weights()  # 防御性：清掉上次失败 load 残留的空 adapter
+            lcm_file = _download_lcm_lora()
+            print(f"[model_loader] → 启用 LCM 快速模式...", flush=True)
+            pipe.load_lora_weights(lcm_file)
+            pipe.scheduler = LCMScheduler.from_config(pipe.scheduler.config)
+            _lcm_active = True
+            print(f"[model_loader] LCM 已启用（建议 steps=4-8, cfg=1.0-2.0）。", flush=True)
+        except Exception as e:
+            print(f"[model_loader] ⚠️ LCM 加载失败，回退标准模式：{e}", flush=True)
+            try:
+                pipe.unload_lora_weights()
+                pipe.scheduler = DPMSolverMultistepScheduler.from_config(pipe.scheduler.config)
+            except Exception:
+                pass
+            _lcm_active = False
+            return False
     elif not active and _lcm_active:
         print(f"[model_loader] → 恢复标准模式...", flush=True)
         pipe.unload_lora_weights()
         pipe.scheduler = DPMSolverMultistepScheduler.from_config(pipe.scheduler.config)
         _lcm_active = False
         print(f"[model_loader] 标准模式已恢复。", flush=True)
+
+    return _lcm_active
 
 
 def is_lcm_active() -> bool:

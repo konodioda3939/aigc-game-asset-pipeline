@@ -41,12 +41,17 @@ from pydantic import BaseModel, Field
 from model_loader import (
     load_pipeline,
     get_pipeline,
+    get_pipeline_for_model,
     get_controlnet_pipeline,
     get_available_controlnet_modes,
     get_triposr_model,
     get_pbr_pipeline,
     ensure_lcm_mode,
     is_lcm_active,
+    get_model_info,
+    get_active_model_key,
+    MODEL_REGISTRY,
+    DEFAULT_MODEL,
     _restore_sd_pipeline,
     _pbr_pipeline,
 )
@@ -91,6 +96,11 @@ class GenerateRequest(BaseModel):
         default=False,
         description="⚡ LCM 快速模式：4-6 步极速出图（~0.75s/张，快约 5 倍），画质略降但可用。"
         "默认 False = 标准 25 步。适合快速预览 / 批量出图。",
+    )
+    model: str = Field(
+        default="anime",
+        description="模型 key：anime（二次元原神风）/ realistic（写实）/ texture（纹理图案）。"
+        "不同模型按需加载切换；首次用新模型会先从 hf-mirror 下载。",
     )
 
 
@@ -323,34 +333,46 @@ async def generate(req: GenerateRequest):
     - **guidance_scale**: 可选，默认 7.5
     - **seed**: 可选，固定相同结果
     """
-    from model_loader import get_pipeline
-
-    pipe = get_pipeline()
+    # 按请求的 model 取管线（不同模型按需换装；未知 key → 400）
+    try:
+        pipe = get_pipeline_for_model(req.model)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     if pipe is None:
         raise HTTPException(status_code=503, detail="模型尚未加载完成，请稍后重试")
 
+    # 某些模型（如 texture）带 prompt_suffix，自动拼到 prompt 末尾引导出图
+    suffix = MODEL_REGISTRY.get(req.model, {}).get("prompt_suffix")
+    prompt_text = f"{req.prompt}, {suffix}" if suffix else req.prompt
+
     actual_seed = req.seed if req.seed is not None else int(time.time() * 1000) % (2**31)
 
-    # ⚡ 快速模式（项目 C 推理优化）：切换 LCM，并用 LCM 推荐参数覆盖默认值
-    # （用户显式指定了非默认 steps/cfg，则尊重用户的选择）
+    # ⚡ 快速模式（项目 C 推理优化）：SD1.5 模型叠 LCM-LoRA 实现 4-8 步出图。
+    # 但部分模型（如 texture = SD2.x）与 SD1.5 LCM-LoRA 架构不兼容——ensure_lcm_mode 会返回 False，
+    # 此时自动降级走标准 DPM（步数减到 20 作为「快速」近似），不崩请求。
     if req.fast_mode:
-        ensure_lcm_mode(True)
-        steps = req.steps if req.steps != 25 else 6
-        cfg = req.guidance_scale if req.guidance_scale != 7.5 else 1.5
-        print(f"[generate] ⚡ 快速模式（LCM）已启用", flush=True)
+        lcm_ok = ensure_lcm_mode(True)
+        if lcm_ok:
+            steps = req.steps if req.steps != 25 else 6
+            cfg = req.guidance_scale if req.guidance_scale != 7.5 else 1.5
+            print(f"[generate] ⚡ 快速模式（LCM）已启用", flush=True)
+        else:
+            steps = req.steps if req.steps != 25 else 20
+            cfg = req.guidance_scale
+            print(f"[generate] ⚠️ 该模型不支持 LCM，使用标准 DPM ~20 步", flush=True)
     else:
         ensure_lcm_mode(False)
         steps = req.steps
         cfg = req.guidance_scale
 
-    print(f"\n[generate] prompt: {req.prompt[:80]}...", flush=True)
+    print(f"\n[generate] model={req.model} | prompt: {prompt_text[:80]}...", flush=True)
     print(f"[generate] steps={steps}, cfg={cfg}, seed={actual_seed}", flush=True)
 
     try:
         generator = torch.Generator(pipe.device).manual_seed(actual_seed)
         with torch.no_grad():
             result = pipe(
-                prompt=req.prompt,
+                prompt=prompt_text,
                 negative_prompt=req.negative_prompt,
                 num_inference_steps=steps,
                 guidance_scale=cfg,
@@ -826,9 +848,12 @@ async def health():
     from model_loader import _pbr_pipeline
     pbr_loaded = _pbr_pipeline is not None
 
+    active_key = get_active_model_key()
+    active_label = MODEL_REGISTRY.get(active_key, {}).get("label", "未加载") if active_key else "未加载"
+
     return HealthResponse(
         status="ready" if pipe is not None else "loading",
-        model="Counterfeit-V2.5 + LoRA (原神风格) + ControlNet + TripoSR + StableMaterials",
+        model=f"{active_label}（key={active_key}）",
         device="cuda" if (pipe and str(pipe.device).startswith("cuda")) else "cpu",
         lora_loaded=lora_loaded,
         controlnet_modes=get_loaded_controlnet_modes() or get_available_controlnet_modes(),
@@ -836,6 +861,15 @@ async def health():
         pbr_loaded=pbr_loaded,
         uptime_seconds=round(uptime, 1),
     )
+
+
+@app.get("/models")
+async def list_models():
+    """列出所有可用模型 + 当前活动模型（供客户端下拉框 / 调试用）。"""
+    return {
+        "models": get_model_info(),
+        "default": DEFAULT_MODEL,
+    }
 
 
 @app.get("/")

@@ -74,3 +74,6 @@ mesh_tools/*.zip
 mesh_tools/d5_regress_lcm.png
 mesh_tools/input/tripoSR_orange.jpg
 mesh_tools/d6_compare/
+
+# ==== 推理服务运行日志（本地调试用，不提交）====
+inference_server/server_startup.log
