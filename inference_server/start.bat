@@ -1,15 +1,14 @@
 @echo off
-chcp 65001 >nul
-title AIGC LoRA 推理服务
+title AIGC Inference Server
 
 echo ================================================
-echo   AIGC LoRA 推理服务 — 启动中...
+echo   AIGC Inference Server - Starting...
 echo ================================================
 echo.
-echo   模型加载需要 5-30 秒，请留意下方进度提示
-echo   看到 "Uvicorn running on http://127.0.0.1:8000" 即启动成功
+echo   Model loading takes 5-30 seconds.
+echo   Ready when you see "Uvicorn running on http://127.0.0.1:8000"
 echo.
-echo   关闭此窗口即可停止服务
+echo   Close this window to STOP the server.
 echo ================================================
 echo.
 
