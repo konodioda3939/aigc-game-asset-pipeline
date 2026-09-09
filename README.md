@@ -26,7 +26,9 @@
 └──────────┘  └──────────┘  └──────────┘  └──────────┘  └──────────┘  └──────────┘  └──────────┘  └──────────┘
 ```
 
-> **📊 项目进度全貌**：**8 个主阶段** ✅ 已**全部完成**；**3 个增强阶段**：✅ 阶段 9 推理优化（3.88→0.75s，**×5.2**）、✅ 阶段 10 3D 模型后处理（19 万面→8000 面，**Unity Tris 降 95.5%**）、✅ 阶段 11 3D 动作生成（MoMask 文生动作 + Mixamo 绑骨，CPU 零显存）。
+> **📊 项目进度全貌**：**8 个主阶段** ✅ 已**全部完成**；**4 个增强阶段**：✅ 阶段 9 推理优化（3.88→0.75s，**×5.2**）、✅ 阶段 10 3D 模型后处理（19 万面→8000 面，**Unity Tris 降 95.5%**）、✅ 阶段 11 3D 动作生成（MoMask 文生动作 + Mixamo 绑骨，CPU 零显存）、✅ 阶段 12 多模型热切换 + 游戏运行时 AIGC（IGC）。
+>
+> **🔗 相关项目**：[ActionArena-Demo](https://github.com/konodioda393939/ActionArena-Demo) —— 第三人称近战动作 Demo（Unity），其「游戏内运行时 AI 换皮」功能即由本仓库推理服务驱动。
 
 ---
 
@@ -62,8 +64,8 @@ aigc-project/
 │   └── comparison/                 ← 有无 LoRA 对比图
 │
 ├── inference_server/
-│   ├── main.py                     ← FastAPI 入口（/generate + /generate-3d + /post-process-mesh 等）
-│   ├── model_loader.py             ← SD + LoRA + ControlNet 加载器（全局单例）
+│   ├── main.py                     ← FastAPI 入口（/generate + /generate-3d + /post-process-mesh + /models 等）
+│   ├── model_loader.py             ← 多模型注册表 + SD/LoRA/ControlNet 加载器（懒加载换装，全局单例）
 │   ├── mesh_postprocessor.py       ← 【项目D】后处理编排（subprocess 调 Blender + ZIP 打包）
 │   ├── blender_scripts/            ← 【项目D】bpy 脚本（Blender headless 调用）
 │   │   └── post_process_mesh.py    ←     减面+展UV+LOD 固化流程
@@ -196,11 +198,13 @@ adapter_model.safetensors (12.2 MB)
 
 | 接口 | 方法 | 说明 |
 |------|------|------|
-| `/generate` | POST | 传入 prompt，返回 PNG 图片（纯文本生图） |
+| `/generate` | POST | 传入 prompt，返回 PNG 图片（纯文本生图，支持 `model` 多模型切换） |
 | `/generate-controlled` | POST | 上传参考图 + prompt，AI 保持结构精修（详见阶段 4） |
 | `/generate-3d` | POST | 上传图片 → AI 生成 3D 模型（详见阶段 5） |
 | `/generate-pbr` | POST | 输入材质描述 → AI 生成 4 张 PBR 贴图 ZIP（详见阶段 6） |
-| `/health` | GET | 服务状态检测 |
+| `/post-process-mesh` | POST | 上传 glb → 减面 + 展 UV + LOD（详见阶段 10） |
+| `/models` | GET | 列出可用模型与当前活动模型（详见阶段 12） |
+| `/health` | GET | 服务状态检测（动态反映当前活动模型） |
 | `/docs` | GET | Swagger 可视化文档（可手动测试） |
 
 **`/generate` 请求参数**：
@@ -208,6 +212,8 @@ adapter_model.safetensors (12.2 MB)
 | 参数 | 默认值 | 说明 |
 |------|--------|------|
 | `prompt` | 必填 | 英文描述，最长 1000 字符 |
+| `model` | `anime` | 模型 key：`anime`（二次元原神风）/ `realistic`（写实）/ `texture`（无缝纹理），见阶段 12 |
+| `fast_mode` | `false` | ⚡ LCM 快速模式（4~6 步极速出图，详见阶段 9） |
 | `steps` | 25 | 推理步数（10~100） |
 | `guidance_scale` | 7.5 | 引导强度（1~20） |
 | `seed` | 随机 | 固定种子可复现 |
@@ -617,15 +623,41 @@ Body: {"prompt": <workflow_json>}
 
 ---
 
+### 阶段 12：多模型热切换 + 游戏运行时 AIGC（✅ 已完成）
+
+一句话：`/generate` 从「单一原神风模型」升级为**三个风格模型按请求热切换**，并作为推理后端驱动游戏 **ActionArena-Demo 的运行时换皮（IGC）**。
+
+**模型注册表（`MODEL_REGISTRY`）**：
+
+| key | label | HF 基座 | 架构 | LCM 兼容 | 说明 |
+|---|---|---|---|---|---|
+| `anime` | 二次元（原神风） | `gsdf/Counterfeit-V2.5` | SD1.5 | ✅ | 叠自训 LoRA（阶段 1），默认模型 |
+| `realistic` | 写实风 | `SG161222/Realistic_Vision_V5.1_no_inpaint` | SD1.5 | ✅ | 首用自动下载 ~2GB |
+| `texture` | 纹理/图案 | `dream-textures/texture-diffusion` | **SD2.x** | ❌ | 自动拼 prompt 后缀生成无缝平铺纹路，首用 ~4GB |
+
+**关键设计**：
+
+- **懒加载换装**：`get_pipeline_for_model(key)` 首次用到某模型才构建，换装时丢弃旧管线、清共享组件缓存（VAE/TextEncoder/ControlNet），`_swap_lock` 互斥防并发 `/generate` 竞态
+- **LCM 兼容性兜底**：`lcm_compatible` 标志声明模型能否叠 SD1.5 LCM-LoRA（判断依据：UNet `cross_attention_dim`，768=SD1.5 / 1024=SD2.x）。texture（SD2.x）不兼容 → `ensure_lcm_mode` 永不抛异常：load 前先 `unload_lora_weights()` 清 peft 残留空 adapter，失败自动降级标准 DPM ~20 步，**请求永不因换模型崩掉**
+- **prompt_suffix 自动拼接**：texture 模型自动追加 `seamless tileable texture, flat, game asset, no human, no face`，压住人像出纯纹路——解决「整张二次元少女立绘当贴图 = 贴纸」的问题
+- **`GET /models`**：列出全部模型 + 当前活动模型，供客户端下拉框自动装配
+- **`/health` 动态化**：`model` 字段实时反映活动模型（不再是写死的全家桶描述）
+
+**游戏运行时集成（IGC）**：[ActionArena-Demo](https://github.com/konodioda393939/ActionArena-Demo) 游戏内按 `G` 呼出面板 → 选模型 → 输入 Prompt → HTTP 调本服务 `/generate`（fast_mode）→ 生成贴图热替换角色材质 `_MainTex`。实测（RTX 4060 Laptop）：anime / texture 双模型 fast_mode 均 200 OK（texture 走 DPM 20 步降级），512×512 纹理直接平铺上角色无违和；无服务时游戏自动进离线模式，不影响游玩。
+
+---
+
 ## 🎯 下一步
 
 - [x] ~~阶段 9 推理优化（项目 C）~~ ✅ SDPA + LCM，3.88→0.75s（×5.2）
-- [x] ~~阶段 10 3D 模型后处理（项目 D）~~ ✅ 19 万→8000 面，Unity Tris 降 95.5%，`/post-process-mesh` 接口上线
+- [x] ~~阶段 10 3D 模型后处理（项目 D）~~ ✅ 19 万面→8000 面，Unity Tris 降 95.5%，`/post-process-mesh` 接口上线
 - [x] ~~阶段 11 3D 动作生成（项目 A）~~ ✅ MoMask 文生动作（走路 BVH，CPU 零显存）+ Mixamo 绑骨 + Unity 按键切换 demo
+- [x] ~~阶段 12 多模型热切换 + 运行时 AIGC~~ ✅ 3 模型注册表 + `/models` + LCM 兼容兜底，驱动 ActionArena-Demo 游戏内换皮
 - [x] ~~图片转 3D 模型~~ ✅ 管线已打通（TripoSR），需升级底模改善质量
 - [x] ~~PBR 材质批量生成~~ ✅ 管线已打通（StableMaterials），prompt → 完整材质球
 - [x] ~~游戏美术工作流引擎~~ ✅ 4 条标准化产线，零新模型依赖
-- [x] ~~ComfyUI 游戏美术工作流~~ ✅ 4 套 .json 节点图 + API，
+- [x] ~~ComfyUI 游戏美术工作流~~ ✅ 4 套 .json 节点图 + API
+- [ ] 实测 `realistic` 模型（SD1.5 同 anime LCM 路径，预期可用，首用下载 ~2GB）
 - [ ] 升级 3D 底模（TRELLIS / Unique3D，改善角色和背面质量）
 - [ ] 训练自己的 ControlNet（用游戏素材风格）
 - [ ] 批量生成 + 多种子变体（一次生成多张，挑最好的）
