@@ -632,7 +632,7 @@ Body: {"prompt": <workflow_json>}
 | key | label | HF 基座 | 架构 | LCM 兼容 | 说明 |
 |---|---|---|---|---|---|
 | `anime` | 二次元（原神风） | `gsdf/Counterfeit-V2.5` | SD1.5 | ✅ | 叠自训 LoRA（阶段 1），默认模型 |
-| `realistic` | 写实风 | `SG161222/Realistic_Vision_V5.1_no_inpaint` | SD1.5 | ✅ | 首用自动下载 ~2GB |
+| `realistic` | 写实风 | `SG161222/Realistic_Vision_V5.1_noVAE` | SD1.5 | ✅ | 首用自动下载 ~4GB（已实测） |
 | `texture` | 纹理/图案 | `dream-textures/texture-diffusion` | **SD2.x** | ❌ | 自动拼 prompt 后缀生成无缝平铺纹路，首用 ~4GB |
 
 **关键设计**：
@@ -643,7 +643,9 @@ Body: {"prompt": <workflow_json>}
 - **`GET /models`**：列出全部模型 + 当前活动模型，供客户端下拉框自动装配
 - **`/health` 动态化**：`model` 字段实时反映活动模型（不再是写死的全家桶描述）
 
-**游戏运行时集成（IGC）**：[ActionArena-Demo](https://github.com/konodioda393939/ActionArena-Demo) 游戏内按 `G` 呼出面板 → 选模型 → 输入 Prompt → HTTP 调本服务 `/generate`（fast_mode）→ 生成贴图热替换角色材质 `_MainTex`。实测（RTX 4060 Laptop）：anime / texture 双模型 fast_mode 均 200 OK（texture 走 DPM 20 步降级），512×512 纹理直接平铺上角色无违和；无服务时游戏自动进离线模式，不影响游玩。
+**游戏运行时集成（IGC）**：[ActionArena-Demo](https://github.com/konodioda393939/ActionArena-Demo) 游戏内按 `G` 呼出面板 → 选模型 → 输入 Prompt → HTTP 调本服务 `/generate`（fast_mode）→ 生成贴图热替换角色材质 `_MainTex`。实测（RTX 4060 Laptop）：**anime / realistic / texture 三模型全部 200 OK**——anime 走 LCM 6 步，realistic 走 LCM 6 步（~2.5s 出高质量写实人像），texture 自动降级 DPM 20 步；512×512 纹理直接平铺上角色无违和；无服务时游戏自动进离线模式，不影响游玩。
+
+> 踩坑备忘（realistic 实测时修复）：① 注册表初版仓库名 `Realistic_Vision_V5.1_no_inpaint` 不存在（HF 匿名访问返回 401，易误判为鉴权问题），正确为 `Realistic_Vision_V5.1_noVAE`；② 该仓库 scheduler `algorithm_type=deis` 与新版 diffusers 默认 `final_sigmas_type=zero` 冲突，`_build_pipeline` 已做自动修正（deis → sigma_min）；③ 基座加载失败时 hf-mirror 自动回退直连。
 
 ---
 
@@ -657,7 +659,7 @@ Body: {"prompt": <workflow_json>}
 - [x] ~~PBR 材质批量生成~~ ✅ 管线已打通（StableMaterials），prompt → 完整材质球
 - [x] ~~游戏美术工作流引擎~~ ✅ 4 条标准化产线，零新模型依赖
 - [x] ~~ComfyUI 游戏美术工作流~~ ✅ 4 套 .json 节点图 + API
-- [ ] 实测 `realistic` 模型（SD1.5 同 anime LCM 路径，预期可用，首用下载 ~2GB）
+- [x] ~~实测 `realistic` 模型~~ ✅ LCM 6 步 ~2.5s 出高质量写实人像（2026-09-09，修 3 处加载阻塞后）
 - [ ] 升级 3D 底模（TRELLIS / Unique3D，改善角色和背面质量）
 - [ ] 训练自己的 ControlNet（用游戏素材风格）
 - [ ] 批量生成 + 多种子变体（一次生成多张，挑最好的）
